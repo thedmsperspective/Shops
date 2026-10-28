@@ -290,6 +290,8 @@ function settingsView(app) {
     <div class="row"><label class="sm" style="margin:0">Import a shop list file: <input type="file" id="libFile" accept=".json" style="width:auto"></label></div>
     <h3>Shopkeepers</h3><label>Extra races or peoples (comma between them)</label><input id="races" value="${esc(S.settings.races)}" placeholder="Goliath, Firbolg">
     <h3>Google Drive</h3><div class="row"><button id="syncNow" class="pri">Sync now</button><span class="mu">${esc(syncMsg)}</span></div>
+    <h3>Add a town from a file</h3><p class="mu small">A town brought over from a tracker sheet, with its shops, stock and gold.</p>
+    <div class="row"><label class="sm" style="margin:0">Town file: <input type="file" id="townFile" accept=".json" style="width:auto"></label></div>
     <h3>Backup</h3><div class="row"><button id="exp">Save a backup file</button><label class="sm" style="margin:0">Load a backup: <input type="file" id="imp" accept=".json" style="width:auto"></label></div></div>`;
   const mine = $('#mine'); if (mine) mine.onchange = () => { S.settings.useMine = mine.checked; save(); };
   $('#races').onchange = e => { S.settings.races = e.target.value; save(); };
@@ -302,6 +304,16 @@ function settingsView(app) {
       LIB = o; await idbPut('library', o);
       try { const t = await getToken(true); await core.writeAppdata(t, LIB_FILE, o); toast('Your shop lists are saved in your Drive.'); } catch (err) { toast(`Saved on this device. ${err.message}`); }
       render();
+    } catch (err) { toast(err.message); }
+  };
+  $('#townFile').onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    try {
+      const o = JSON.parse(await f.text());
+      if (o?.app !== 'dmp-shops-town' || !o.location) throw new Error("That isn't a town file.");
+      const l = o.location;
+      if (S.locations.some(x => x.name.toLowerCase() === l.name.toLowerCase()) && !confirm(`You already have a town called ${l.name}. Add this one as well?`)) return;
+      l.id = uid(); S.locations.push(l); await save(); toast(`${l.name} is in, with ${l.shops.length} shops.`); go('location', { loc: l.id });
     } catch (err) { toast(err.message); }
   };
   $('#exp').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify({ app: 'dmp-shops', v: 1, state: S }, null, 1)], { type: 'application/json' })); a.download = `shops-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click(); };
