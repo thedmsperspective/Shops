@@ -262,7 +262,7 @@ function newMonth() {
       const s = l.shops[i];
       const r = R.monthFor(s, s.items, { maxQ: sz.maxQ || 5 });
       const ns = r.shop;
-      const line = `Quality ${r.quality}: sold ${r.sold.reduce((t, x) => t + x.n, 0)} items for ${R.money(r.made)}, bought ${r.bought.reduce((t, x) => t + x.n, 0)} for ${R.money(r.spent)}${r.change ? ` · ${r.change === 'closed' ? 'CLOSED' : r.change === 'upgraded' ? 'became a building' : 'dropped to a stall'}` : ''}`;
+      const line = `Quality ${r.quality}${r.debt ? ' (started in debt: a bad month)' : ''}: sold ${r.sold.reduce((t, x) => t + x.n, 0)} items for ${R.money(r.made)}, bought ${r.bought.reduce((t, x) => t + x.n, 0)} for ${R.money(r.spent)}${r.change ? ` · ${r.change === 'closed' ? 'CLOSED' : r.change === 'upgraded' ? 'became a building' : 'dropped to a stall'}` : ''}`;
       ns.log = [...(s.log || []), line].slice(-24);
       l.shops[i] = ns;
       if (s.status !== 'closed') report.push({ town: l.name, shop: shopTitle(ns), line, change: r.change });

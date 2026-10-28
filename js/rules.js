@@ -136,15 +136,16 @@ export function monthFor(shop, list, { maxQ = 5 } = {}) {
     return { ...n, everSold: old?.everSold };
   });
   next.gold = (shop.gold || 0) + made - spent;
-  // three months in a row: a stall closes (low) or becomes a building (high); a building drops to a stall (low)
-  const low = q <= 2;
+  // three months in a row: a stall closes (low) or becomes a building (high); a building drops to a stall (low).
+  // Starting the month in debt counts as a bad month too, the same as a Quality 1–2 roll.
+  const low = q <= 2 || (shop.gold || 0) < 0;
   next.lowRun = low ? (shop.lowRun || 0) + 1 : 0;
   next.highRun = low ? 0 : (shop.highRun || 0) + 1;
   let change = '';
   if (shop.form === 'stall' && next.lowRun >= 3) { next.status = 'closed'; change = 'closed'; }
   else if (shop.form === 'stall' && next.highRun >= 3) { next.form = 'building'; next.highRun = 0; change = 'upgraded'; }
   else if (shop.form === 'building' && next.lowRun >= 3) { next.form = 'stall'; next.lowRun = 0; change = 'downgraded'; }
-  return { shop: next, sold, bought, made, spent, quality: q, change };
+  return { shop: next, sold, bought, made, spent, quality: q, change, debt: (shop.gold || 0) < 0 };
 }
 
 /* ---------- the party at a shop ---------- */
