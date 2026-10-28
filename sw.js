@@ -1,5 +1,5 @@
 // Offline support. Bump VERSION when publishing an update.
-const VERSION = 'shops-v4';
+const VERSION = 'shops-v5';
 const FILES = ['./', 'index.html', 'style.css', 'manifest.webmanifest', 'icon.svg', 'js/app.js', 'js/rules.js', 'js/names.js', 'js/srd-shops.js'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES).then(() => c.add('/core/suite.js').catch(() => {}))).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(k => Promise.all(k.filter(x => x.startsWith('shops-') && x !== VERSION).map(x => caches.delete(x)))).then(() => self.clients.claim())); });

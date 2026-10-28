@@ -144,7 +144,7 @@ function locationView(app) {
     <p class="mu small">Players see this town's shops while the party is here and it's open to them.</p></div>
   <div class="card"><div class="row"><h3 class="grow" style="margin:0">Shops</h3><button id="addShop">+ Add a shop</button><button id="reroll">Roll the town again</button></div>
     <div class="grid" style="margin-top:8px">${l.shops.map(s => `<button class="tile ${s.status === 'closed' ? 'closed' : ''}" data-shop="${s.id}"><b>${esc(shopTitle(s))}</b><span class="mu">${esc(s.type)} · ${qLabel(s.quality)} · ${s.form === 'building' ? 'Building' : 'Stall'}</span><br>
-      ${s.status === 'closed' ? '<span class="tag bad">Closed</span>' : ''}${s.haggleWon ? '<span class="tag ok">Haggled</span>' : ''}${countdown(s)}<span class="tag ${s.gold < 0 ? 'bad' : ''}">${s.gold < 0 ? 'In debt ' : ''}${R.money(s.gold, { short: true })}</span></button>`).join('') || '<p class="mu">No shops yet.</p>'}</div></div>
+      ${s.status === 'closed' ? '<span class="tag bad">Closed</span>' : ''}${s.haggleWon ? '<span class="tag ok">Haggled</span>' : ''}${countdown(s)}<span class="tag ${R.shopCp(s) < 0 ? 'bad' : ''}">${R.shopCp(s) < 0 ? 'In debt ' : ''}${R.money(R.shopCp(s), { short: true })}</span></button>`).join('') || '<p class="mu">No shops yet.</p>'}</div></div>
   <div class="card"><h3>At the table</h3><p class="mu small">Players only see whether these are here and open.</p>${svc}</div>
   <div class="card"><button class="bad" id="delLoc">Delete this town</button></div>`;
   app.querySelectorAll('[data-shop]').forEach(b => { b.onclick = () => go('shop', { shop: b.dataset.shop }); });
@@ -187,11 +187,11 @@ function shopView(app) {
     <p class="mu small">Players see the shop's name and the proprietor's name, race and gender. Age and descriptors are yours.</p></div>
   <div class="card"><h3 style="margin-top:0">This month</h3>
     <div class="stats">
-      <div class="stat"><small>${s.gold < 0 ? 'In debt' : 'Gold on hand'}</small><b style="${s.gold < 0 ? 'color:#f1b0a5' : ''}">${R.money(s.gold)}</b></div>
+      <div class="stat" style="grid-column:span 2"><small>${R.shopCp(s) < 0 ? 'In debt' : 'Coins on hand'} · worth ${R.money(R.shopCp(s))}</small><b style="${R.shopCp(s) < 0 ? 'color:#f1b0a5' : ''}">${esc(R.purseText(R.purseOf(s)))}</b></div>
       <div class="stat"><small>Prices</small><b>${Math.round((s.priceMod || 1) * 100)}%</b></div>
       <div class="stat"><small>Haggling</small><b>${s.haggle?.dc ? `DC ${s.haggle.dc}, ${s.haggle.off}% off` : "Won't haggle"}</b></div>
       <div class="stat"><small>Started at</small><b>${qLabel(s.startQuality || s.quality)}</b></div></div>
-    <div class="row">${s.haggle?.dc ? `<button id="haggle" aria-pressed="${!!s.haggleWon}">${s.haggleWon ? '✓ Haggle succeeded (whole party, this month)' : 'Haggle succeeded'}</button>` : ''}<button id="gold">Change gold</button>
+    <div class="row">${s.haggle?.dc ? `<button id="haggle" aria-pressed="${!!s.haggleWon}">${s.haggleWon ? '✓ Haggle succeeded (whole party, this month)' : 'Haggle succeeded'}</button>` : ''}<button id="gold">Change coins</button>
       <button id="status">${s.status === 'closed' ? 'Reopen the shop' : 'Close the shop'}</button></div></div>
   <div class="card"><div class="row"><h3 class="grow" style="margin:0">On the shelf</h3><button id="addItem">+ Add an item</button><button id="restockNow">Roll this shop's stock again</button></div>
     <p class="mu small">Price is what the shop charges (with its ${Math.round((s.priceMod || 1) * 100)}%); it buys at half value. Faded items aren't on the shelf this month.</p>
@@ -216,7 +216,14 @@ function shopView(app) {
   $('#rollShopName').onclick = () => { s.name = N.shopNameFor(s.type, k2.name); save(); render(); };
   $('#rename').onclick = () => { const n = prompt('Shop name', s.name || ''); if (n != null) { s.name = n.trim(); save(); render(); } };
   const h = $('#haggle'); if (h) h.onclick = () => { s.haggleWon = !s.haggleWon; save(); render(); };
-  $('#gold').onclick = () => { const v = prompt('Gold on hand (gp)', (s.gold / 100).toString()); if (v != null && !Number.isNaN(Number(v))) { s.gold = Math.round(Number(v) * 100); save(); render(); } };
+  $('#gold').onclick = () => {
+    const p = R.purseOf(s);
+    modal(`<h2>Coins on hand</h2><div class="row">${R.COINS.map(c => `<div class="grow"><label>${c}</label><input data-coin="${c}" value="${p[c] || 0}" inputmode="numeric"></div>`).join('')}</div>
+      <div class="row" style="margin-top:12px"><button class="pri" id="cs">Save</button><button id="cx">Cancel</button></div>`, m => {
+      $('#cx', m).onclick = closeModal;
+      $('#cs', m).onclick = () => { s.purse = Object.fromEntries(R.COINS.map(c => [c, Number($(`[data-coin="${c}"]`, m).value) || 0])); delete s.gold; save(); closeModal(); render(); };
+    });
+  };
   $('#status').onclick = () => { s.status = s.status === 'closed' ? 'open' : 'closed'; s.lowRun = 0; s.highRun = 0; save(); render(); };
   $('#restockNow').onclick = () => { if (!confirm('Roll this shop\'s stock again at its current quality? (Gold doesn\'t change.)')) return; s.items = R.stockFor(s.items, s.quality, s.items); save(); render(); };
   $('#addItem').onclick = () => addItemDialog(s);
@@ -290,7 +297,7 @@ function settingsView(app) {
     <div class="row"><label class="sm" style="margin:0">Import a shop list file: <input type="file" id="libFile" accept=".json" style="width:auto"></label></div>
     <h3>Shopkeepers</h3><label>Extra races or peoples (comma between them)</label><input id="races" value="${esc(S.settings.races)}" placeholder="Goliath, Firbolg">
     <h3>Google Drive</h3><div class="row"><button id="syncNow" class="pri">Sync now</button><span class="mu">${esc(syncMsg)}</span></div>
-    <h3>Add a town from a file</h3><p class="mu small">A town brought over from a tracker sheet, with its shops, stock and gold.</p>
+    <h3>Add a town from a file</h3><p class="mu small">A town brought over from a tracker sheet, with its shops, stock and coins.</p>
     <div class="row"><label class="sm" style="margin:0">Town file: <input type="file" id="townFile" accept=".json" style="width:auto"></label></div>
     <h3>Backup</h3><div class="row"><button id="exp">Save a backup file</button><label class="sm" style="margin:0">Load a backup: <input type="file" id="imp" accept=".json" style="width:auto"></label></div></div>`;
   const mine = $('#mine'); if (mine) mine.onchange = () => { S.settings.useMine = mine.checked; save(); };
