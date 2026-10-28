@@ -144,7 +144,7 @@ function locationView(app) {
     <p class="mu small">Players see this town's shops while the party is here and it's open to them.</p></div>
   <div class="card"><div class="row"><h3 class="grow" style="margin:0">Shops</h3><button id="addShop">+ Add a shop</button><button id="reroll">Roll the town again</button></div>
     <div class="grid" style="margin-top:8px">${l.shops.map(s => `<button class="tile ${s.status === 'closed' ? 'closed' : ''}" data-shop="${s.id}"><b>${esc(shopTitle(s))}</b><span class="mu">${esc(s.type)} · ${qLabel(s.quality)} · ${s.form === 'building' ? 'Building' : 'Stall'}</span><br>
-      ${s.status === 'closed' ? '<span class="tag bad">Closed</span>' : ''}${s.haggleWon ? '<span class="tag ok">Haggled</span>' : ''}${countdown(s)}<span class="tag">${R.money(s.gold, { short: true })}</span></button>`).join('') || '<p class="mu">No shops yet.</p>'}</div></div>
+      ${s.status === 'closed' ? '<span class="tag bad">Closed</span>' : ''}${s.haggleWon ? '<span class="tag ok">Haggled</span>' : ''}${countdown(s)}<span class="tag ${s.gold < 0 ? 'bad' : ''}">${s.gold < 0 ? 'In debt ' : ''}${R.money(s.gold, { short: true })}</span></button>`).join('') || '<p class="mu">No shops yet.</p>'}</div></div>
   <div class="card"><h3>At the table</h3><p class="mu small">Players only see whether these are here and open.</p>${svc}</div>
   <div class="card"><button class="bad" id="delLoc">Delete this town</button></div>`;
   app.querySelectorAll('[data-shop]').forEach(b => { b.onclick = () => go('shop', { shop: b.dataset.shop }); });
@@ -187,7 +187,7 @@ function shopView(app) {
     <p class="mu small">Players see the shop's name and the proprietor's name, race and gender. Age and descriptors are yours.</p></div>
   <div class="card"><h3 style="margin-top:0">This month</h3>
     <div class="stats">
-      <div class="stat"><small>Gold on hand</small><b>${R.money(s.gold)}</b></div>
+      <div class="stat"><small>${s.gold < 0 ? 'In debt' : 'Gold on hand'}</small><b style="${s.gold < 0 ? 'color:#f1b0a5' : ''}">${R.money(s.gold)}</b></div>
       <div class="stat"><small>Prices</small><b>${Math.round((s.priceMod || 1) * 100)}%</b></div>
       <div class="stat"><small>Haggling</small><b>${s.haggle?.dc ? `DC ${s.haggle.dc}, ${s.haggle.off}% off` : "Won't haggle"}</b></div>
       <div class="stat"><small>Started at</small><b>${qLabel(s.startQuality || s.quality)}</b></div></div>
