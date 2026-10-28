@@ -3,6 +3,7 @@
 import * as R from './rules.js';
 import * as N from './names.js';
 import { SRD_SHOPS } from './srd-shops.js';
+import { startPlayer } from './player.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -26,7 +27,62 @@ const ui = { view: 'home', loc: null, shop: null };
 async function save() {
   S.stamp = Date.now();
   await idbPut('state', S);
-  syncSoon();
+  syncSoon(); publishSoon();
+}
+
+/* ---------- the table: what players see, and their buying and selling (answered here, on the DM's device) ---------- */
+const amDm = () => core?.tableRole?.() === 'dm' && core.currentTable?.()?.id;
+let pubT = null, lastPub = '', stopReq = null;
+function publishSoon() { clearTimeout(pubT); pubT = setTimeout(publish, 600); }
+const tablePass = async () => { let p = core.signedIn(''); if (!p && core.refreshNow) p = await core.refreshNow(); return p?.value || null; };
+function playerView() {
+  const l = S.locations.find(x => x.partyHere && x.open);
+  if (!l) return { closed: true, t: Date.now() };
+  return {
+    town: l.name, size: l.size, services: l.services || {}, t: Date.now(),
+    shops: l.shops.map(s => ({
+      id: s.id, name: shopTitle(s), type: s.type, status: s.status, haggled: !!s.haggleWon,
+      keeper: { name: s.keeper?.name || '', race: s.keeper?.race || '', gender: s.keeper?.gender || '' },
+      // only what's on the shelf, at the price the party pays (haggled only once they've won it)
+      items: s.items.filter(i => i.qty == null || i.qty > 0).filter(i => i.value).map(i => ({ id: i.id, n: i.name, q: i.qty ?? null, p: R.sellPrice(s, i, s.haggleWon), band: i.band, magic: !!i.magic, d: String(i.desc || '').slice(0, 240) })),
+      buys: s.items.filter(i => i.value).map(i => ({ n: i.name, p: R.buyPrice(s, i, s.haggleWon) })),
+    })),
+  };
+}
+async function publish() {
+  if (!amDm()) return;
+  const v = playerView(), k = JSON.stringify({ ...v, t: 0 });
+  if (k === lastPub) return;
+  try { const T = await core.tables(); await T.publishShops(await tablePass(), core.currentTable().id, v); lastPub = k; } catch (e) { console.warn('publish shops', e); }
+}
+async function listenToPlayers() {
+  if (!amDm() || stopReq) return;
+  const T = await core.tables(); const tid = core.currentTable().id;
+  stopReq = T.watchShopRequests(await tablePass(), tid, async ({ uid, rid, req }) => {
+    const l = S.locations.find(x => x.partyHere && x.open), i = l ? l.shops.findIndex(s => s.id === req.shopId) : -1;
+    let ans;
+    if (!l || i < 0) ans = { error: "That shop isn't open to you right now." };
+    else if (l.shops[i].status === 'closed') ans = { error: 'That shop is closed.' };
+    else if (req.kind === 'buy') {
+      const r = R.sale(l.shops[i], req.itemId, Math.max(1, Number(req.n) || 1), req.purse || {});
+      if (r.error) ans = { error: r.error };
+      else {
+        l.shops[i] = { ...r.shop, log: [...(r.shop.log || []), `${req.who || 'A player'} bought ${r.item.name} for ${R.money(r.cp)}`].slice(-40) };
+        ans = { ok: true, cp: r.cp, give: r.give, change: r.change };
+        toast(`${req.who || 'A player'} bought ${r.item.name} at ${shopTitle(l.shops[i])}.`);
+      }
+    } else if (req.kind === 'sell') {
+      const r = R.purchase(l.shops[i], req.name, Math.max(1, Number(req.n) || 1));
+      if (r.error) ans = { error: r.error };
+      else {
+        l.shops[i] = { ...r.shop, log: [...(r.shop.log || []), `${req.who || 'A player'} sold ${r.item.name} for ${R.purseText(r.paid)}`].slice(-40) };
+        ans = { ok: true, cp: r.cp, paid: r.paid };
+        toast(`${req.who || 'A player'} sold ${r.item.name} to ${shopTitle(l.shops[i])}.`);
+      }
+    } else ans = { error: 'Unknown request.' };
+    try { await T.answerShop(await tablePass(), tid, uid, rid, ans); } catch (e) { console.warn('answer', e); }
+    if (ans.ok) { await save(); if (ui.view !== 'home') render(); }
+  });
 }
 
 /* ---------- item lists: the DM's own, or the SRD's for the table's edition ---------- */
@@ -91,11 +147,12 @@ function rollTown(l) {
 }
 
 /* ---------- screens ---------- */
+let playerStarted = false;
 function render() {
   const app = $('#app');
   $('#back').hidden = ui.view === 'home';
   $('#crumb').textContent = ui.view === 'shop' ? `${loc()?.name || ''}` : '';
-  if (isPlayer()) { app.innerHTML = '<div class="card"><h2>Shops</h2><p>The player side is coming next: browsing the shops where your party is, and buying and selling.</p></div>'; return; }
+  if (isPlayer()) { if (!playerStarted) { playerStarted = true; $('#settingsBtn').hidden = true; startPlayer(core, { toast }); } return; }
   if (ui.view === 'location' && loc()) return locationView(app);
   if (ui.view === 'shop' && shopOf()) return shopView(app);
   if (ui.view === 'settings') return settingsView(app);
@@ -337,6 +394,7 @@ window.addEventListener('dmp-suite', () => render());
   if (lib) LIB = lib;
   await coreReady;
   render();
-  if (core?.signedIn?.(core.SCOPES.appdata, { app: 'shops' }) || core?.staysSignedIn?.()) sync(false);
+  if (!isPlayer() && (core?.signedIn?.(core.SCOPES.appdata, { app: 'shops' }) || core?.staysSignedIn?.())) sync(false);
+  if (amDm()) { publish(); listenToPlayers(); }
 })();
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
