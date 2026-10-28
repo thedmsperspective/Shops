@@ -1,0 +1,2 @@
+{ "name": "Shops", "short_name": "Shops", "start_url": "./", "display": "standalone", "background_color": "#1b1714", "theme_color": "#1b1714",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }] }
