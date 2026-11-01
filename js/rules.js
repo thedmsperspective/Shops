@@ -163,15 +163,16 @@ export function rollShops(sizeKey) {
   return { shops: [GENERAL, ...rolled.map(x => x.t)].sort((a, b) => SHOPS.indexOf(a) - SHOPS.indexOf(b)), services };
 }
 
-/** A new month in a settlement below its limit: every shop type it doesn't have open rolls its d100 at the settlement's
- *  odds, and the best roll that makes it opens (one at most). Returns the type, or '' if none opens. */
+/** A new month in a settlement below its limit: one d100 at the settlement's odds; if it makes it, one shop type the
+ *  settlement doesn't have open opens (at random). Returns the type, or '' if none opens. */
 export function rollNewShop(sizeKey, shops) {
   const s = sizeOf(sizeKey);
   const open = shops.filter(x => x.status !== 'closed' && x.type !== GENERAL);
   if (!s.maxShops || open.length >= s.maxShops) return '';
+  if (d(100) < s.green) return '';
   const have = new Set(open.map(x => x.type));
-  const best = SHOPS.filter(t => t !== GENERAL && !have.has(t)).map(t => ({ t, r: d(100) })).filter(x => x.r >= s.green).sort((a, b) => b.r - a.r)[0];
-  return best?.t || '';
+  const missing = SHOPS.filter(t => t !== GENERAL && !have.has(t));
+  return missing.length ? pick(missing) : '';
 }
 
 /* ---------- a new month ---------- */
