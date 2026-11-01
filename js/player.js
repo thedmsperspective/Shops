@@ -56,28 +56,43 @@ function draw() {
       <div class="row"><button id="tbuy" aria-pressed="${tab === 'buy'}">Buy</button><button id="tsell" aria-pressed="${tab === 'sell'}">Sell</button></div></div>
       ${shop.status === 'closed' ? '<div class="warn">This shop is closed.</div>' : tab === 'buy' ? `<div class="card"><table class="stock"><thead><tr><th>Item</th><th class="num">In stock</th><th class="num">Price</th><th></th></tr></thead><tbody>
         ${bands.map(g => `<tr class="band"><td colspan="4">${g.b} Quality</td></tr>${g.items.map(it => `<tr><td>${esc(it.n)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.d ? `<br><small class="mu">${esc(it.d)}</small>` : ''}</td><td class="num">${it.q == null ? '∞' : it.q}</td><td class="num">${R.money(it.p)}</td><td><button class="sm pri" data-buy="${it.id}" ${busy || !c ? 'disabled' : ''}>Buy</button></td></tr>`).join('')}`).join('') || '<tr><td class="mu">Nothing on the shelf right now.</td></tr>'}
-      </tbody></table></div>` : `<div class="card"><p class="mu small">${esc(shop.name)} only buys the kinds of things it sells.</p>
-        ${mine.length ? `<table class="stock"><thead><tr><th>Your item</th><th class="num">You have</th><th class="num">They pay</th><th></th></tr></thead><tbody>${mine.map(x => `<tr><td>${esc(x.row.name)}</td><td class="num">${n(x.row.qty) || 1}</td><td class="num">${R.money(x.p)}</td><td><button class="sm pri" data-sell="${esc(x.key)}" ${busy ? 'disabled' : ''}>Sell one</button></td></tr>`).join('')}</tbody></table>` : '<p>Nothing in your inventory that this shop buys.</p>'}</div>`}`;
+      </tbody></table></div>` : `<div class="card"><p class="mu small">${shop.buysAll ? `${esc(shop.name)} buys almost anything. For things it doesn't stock, ask for an offer.` : `${esc(shop.name)} only buys the kinds of things it sells.`}</p>
+        ${mine.length ? `<table class="stock"><thead><tr><th>Your item</th><th class="num">You have</th><th class="num">They pay</th><th></th></tr></thead><tbody>${mine.map(x => `<tr><td>${esc(x.row.name)}</td><td class="num">${n(x.row.qty) || 1}</td>
+          <td class="num">${x.p != null ? R.money(x.p) : x.offer?.no ? '<span class="tag bad">Won\'t buy</span>' : x.waiting ? '<span class="tag">Waiting for an offer</span>' : '<span class="mu">—</span>'}</td>
+          <td>${x.p != null ? `<button class="sm pri" data-sell="${esc(x.key)}" ${busy ? 'disabled' : ''}>Sell one</button>${x.offer ? ` <button class="sm" data-no="${esc(x.key)}" ${busy ? 'disabled' : ''}>No thanks</button>` : ''}` : x.offer?.no || x.waiting ? '' : `<button class="sm" data-ask="${esc(x.key)}" ${busy ? 'disabled' : ''}>Ask for an offer</button>`}</td></tr>`).join('')}</tbody></table>` : `<p>${shop.buysAll ? 'Your inventory is empty.' : 'Nothing in your inventory that this shop buys.'}</p>`}</div>`}`;
     $('#out').onclick = () => { open = null; draw(); };
     $('#tbuy').onclick = () => { tab = 'buy'; draw(); };
     $('#tsell').onclick = () => { tab = 'sell'; draw(); };
     app.querySelectorAll('[data-buy]').forEach(b => { b.onclick = () => buy(shop, shop.items.find(x => x.id === b.dataset.buy)); });
     app.querySelectorAll('[data-sell]').forEach(b => { b.onclick = () => sell(shop, mine.find(x => x.key === b.dataset.sell)); });
+    app.querySelectorAll('[data-ask]').forEach(b => { b.onclick = () => askOffer(shop, mine.find(x => x.key === b.dataset.ask)); });
+    app.querySelectorAll('[data-no]').forEach(b => { b.onclick = async () => { const x = mine.find(y => y.key === b.dataset.no); const r = await ask({ kind: 'decline', shopId: shop.id, offerId: x.offer.id, name: x.name }); if (r.error) toast(r.error); draw(); }; });
   }
   const w = $('#who'); if (w) w.onchange = () => { charId = w.value; try { localStorage.setItem('dmp-shops-char', charId); } catch { /* */ } draw(); };
 }
 
-// Inventory rows this shop will buy (by name, the way the shop lists them)
+// Inventory rows this shop will buy (by name, the way the shop lists them). The General Store buys anything: rows it
+// has no price for get an offer from it (from the DM's lists, or the DM names one).
 function sellable(shop, c) {
   if (!c) return [];
   const buys = new Map((shop.buys || []).map(b => [b.n.toLowerCase(), b]));
+  const offers = (shop.offers || []).filter(o => !o.who || o.who === (c.name || ''));
   const out = [];
   for (const [cat, rows] of Object.entries(c.inv || {})) (rows || []).forEach((row, i) => {
-    const b = buys.get(String(row.name || '').trim().toLowerCase());
-    if (b && (row.qty === '' || row.qty == null || n(row.qty) > 0)) out.push({ key: `${cat}.${i}`, cat, i, row, p: b.p, name: b.n });
+    const nm = String(row.name || '').trim(); if (!nm) return;
+    if (!(row.qty === '' || row.qty == null || n(row.qty) > 0)) return;
+    const b = buys.get(nm.toLowerCase());
+    if (b) { out.push({ key: `${cat}.${i}`, cat, i, row, p: b.p, name: b.n }); return; }
+    if (!shop.buysAll) return;
+    const o = offers.find(x => x.n.toLowerCase() === nm.toLowerCase());
+    out.push({ key: `${cat}.${i}`, cat, i, row, name: nm, p: o && !o.no ? o.p : null, offer: o || null, waiting: !o && asked.has(askKey(c, nm)) });
   });
   return out;
 }
+// what this device asked the General Store to price (so it shows "waiting" until the DM answers)
+const askKey = (c, nm) => `${c?.id}|${nm.toLowerCase()}`;
+const asked = new Set((() => { try { return JSON.parse(localStorage.getItem('dmp-shops-asked') || '[]'); } catch { return []; } })());
+const keepAsked = () => { try { localStorage.setItem('dmp-shops-asked', JSON.stringify([...asked].slice(-100))); } catch { /* */ } };
 
 async function ask(req) {
   busy = true; draw();
@@ -102,9 +117,19 @@ async function buy(shop, it) {
   });
   toast(`Bought ${it.n} for ${R.money(r.cp)}.${R.purseCp(r.change) ? ` Change: ${R.purseText(r.change)}.` : ''}`);
 }
+// The General Store: what would it pay for this? An offer at once (from the DM's lists), or the DM names one later
+async function askOffer(shop, x) {
+  const c = me(); if (!c || !x) return;
+  const r = await ask({ kind: 'quote', shopId: shop.id, name: x.name, n: 1, who: c.name || '' });
+  if (r.error) { toast(r.error); draw(); return; }
+  if (r.refused) { toast(`${shop.name} won't buy that.`); draw(); return; }
+  if (r.pending) { asked.add(askKey(c, x.name)); keepAsked(); toast(`${shop.name} will think it over. Your DM names a price; check back here.`); draw(); return; }
+  if (r.quote && confirm(`${shop.name} offers ${R.money(r.quote)} for one ${x.name}. Sell it?`)) return sell(shop, { ...x, offer: r.offerId ? { id: r.offerId } : null });
+  draw();
+}
 async function sell(shop, x) {
   const c = me(); if (!c || !x) return;
-  const r = await ask({ kind: 'sell', shopId: shop.id, name: x.name, n: 1, who: c.name || '' });
+  const r = await ask({ kind: 'sell', shopId: shop.id, name: x.name, n: 1, who: c.name || '', ...(x.offer?.id ? { offerId: x.offer.id } : {}) });
   if (r.error) { toast(r.error); draw(); return; }
   await changeSheet(c.id, ch => {
     ch.coins = { ...(ch.coins || {}), ...R.addCoins(purseOfChar(ch), r.paid) };
@@ -112,6 +137,7 @@ async function sell(shop, x) {
     if (row) { const left = n(row.qty || 1) - 1; if (left > 0) row.qty = left; else list.splice(list.indexOf(row), 1); }
     return ['coins', `inv.${x.cat}`];
   });
+  asked.delete(askKey(c, x.name)); keepAsked();
   toast(`Sold ${x.name} for ${R.purseText(r.paid)}.`);
 }
 const catFor = (type, it) => (type === 'Blacksmith' && /armor|mail|plate|shield|breastplate|leather|hide/i.test(it.n) ? 'armor'

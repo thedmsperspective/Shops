@@ -148,15 +148,19 @@ export function newShop(type, list, { q = null, maxQ = 5, goldTable = null } = {
     items: stockFor(list, quality), keeper: null, log: [],
   };
 }
-/** Which shops a settlement has: a d100 each (green shops and the two services by their own odds),
- *  at most one service for every 4 green shops, and no more than the settlement's maximum. */
+/** Every settlement has a General Store, on top of the shops it rolls (a Hamlet's is a Quality 1 stall). */
+export const GENERAL = 'General';
+/** The best quality a shop can reach in a settlement (a Hamlet's General Store: 1). */
+export const qualityCap = sizeKey => Math.max(1, sizeOf(sizeKey).maxQ || 0);
+/** Which shops a settlement has: the General Store, then a d100 each for the rest (green shops and the two services
+ *  by their own odds), at most one service for every 4 green shops, and no more than the settlement's maximum. */
 export function rollShops(sizeKey) {
   const s = sizeOf(sizeKey);
-  if (!s.maxShops) return { shops: [], services: [] };
-  const rolled = SHOPS.map(t => ({ t, r: d(100) })).filter(x => x.r >= s.green).sort((a, b) => b.r - a.r).slice(0, s.maxShops);
+  if (!s.maxShops) return { shops: [GENERAL], services: [] };
+  const rolled = SHOPS.filter(t => t !== GENERAL).map(t => ({ t, r: d(100) })).filter(x => x.r >= s.green).sort((a, b) => b.r - a.r).slice(0, s.maxShops);
   const room = Math.min(Math.floor(rolled.length / 4), s.maxShops - rolled.length);
   const services = SERVICES.map(t => ({ t, r: d(100) })).filter(x => x.r >= s.red).sort((a, b) => b.r - a.r).slice(0, Math.max(0, room)).map(x => x.t);
-  return { shops: rolled.map(x => x.t).sort((a, b) => SHOPS.indexOf(a) - SHOPS.indexOf(b)), services };
+  return { shops: [GENERAL, ...rolled.map(x => x.t)].sort((a, b) => SHOPS.indexOf(a) - SHOPS.indexOf(b)), services };
 }
 
 /* ---------- a new month ---------- */
@@ -183,6 +187,7 @@ export function monthFor(shop, list, { maxQ = 5 } = {}) {
     if (n.qty > had) { const k = n.qty - had, cp = k * buyPrice(next, n); bought.push({ name: n.name, n: k, cp }); spent += cp; inCoin(n, cp, -1); }
     return { ...n, everSold: old?.everSold };
   });
+  next.items = next.items.filter(x => !(x.broughtIn && !x.qty)); // things the party sold it are gone once they've sold on
   purse = Object.fromEntries(COINS.map(c => [c, Math.round(purse[c] * 100) / 100]));
   next.purse = purse; delete next.gold;
   // three months in a row: a stall closes (low) or becomes a building (high); a building drops to a stall (low).
@@ -191,9 +196,11 @@ export function monthFor(shop, list, { maxQ = 5 } = {}) {
   next.lowRun = low ? (shop.lowRun || 0) + 1 : 0;
   next.highRun = low ? 0 : (shop.highRun || 0) + 1;
   let change = '';
-  if (shop.form === 'stall' && next.lowRun >= 3) { next.status = 'closed'; change = 'closed'; }
+  if (shop.form === 'stall' && next.lowRun >= 3 && shop.type === GENERAL) { next.lowRun = 0; } // the General Store hangs on
+  else if (shop.form === 'stall' && next.lowRun >= 3) { next.status = 'closed'; change = 'closed'; }
   else if (shop.form === 'stall' && next.highRun >= 3) { next.form = 'building'; next.highRun = 0; change = 'upgraded'; }
   else if (shop.form === 'building' && next.lowRun >= 3) { next.form = 'stall'; next.lowRun = 0; change = 'downgraded'; }
+  next.offers = []; // offers on things players brought in last only until the month turns
   return { shop: next, sold, bought, made, spent, quality: q, change, debt: shopCp(shop) < 0 };
 }
 
@@ -222,4 +229,17 @@ export function purchase(shop, name, n = 1) {
   if (!paid) return { error: shopCp(shop) < cp ? `${shop.name || shop.type} can't afford it right now.` : `${shop.name || shop.type} doesn't have the right coins to pay that exactly.` };
   const items = shop.items.map(x => (x.id === it.id ? { ...x, qty: x.qty == null ? null : x.qty + n } : x));
   return { shop: { ...shop, items, purse: addCoins(purseOf(shop), paid, -1) }, cp, paid, item: it };
+}
+/** The General Store buys anything: n of something not on its list, at cpEach a piece. It goes on the shelf at twice
+ *  what the store paid (so the party could buy it back), and sells off with the next month like everything else. */
+export function purchaseAny(shop, name, n, cpEach) {
+  const cp = n * cpEach;
+  if (!(cp > 0)) return { error: `${shop.name || shop.type} won't pay anything for that.` };
+  const paid = payFrom(purseOf(shop), cp);
+  if (!paid) return { error: shopCp(shop) < cp ? `${shop.name || shop.type} can't afford it right now.` : `${shop.name || shop.type} doesn't have the right coins to pay that exactly.` };
+  const items = [...shop.items];
+  const at = items.findIndex(x => x.name.toLowerCase() === String(name).toLowerCase());
+  const item = { id: Math.random().toString(36).slice(2, 10), name: String(name).slice(0, 100), magic: false, band: 0, value: (cpEach * 2) / 100, coin: 'gp', unit: 'each', src: 'Brought in', desc: '', rule: { d: [0, 0, 0, 0, 0], m: [0, 0, 0, 0, 0] }, qty: n, broughtIn: true };
+  if (at >= 0) items[at] = { ...items[at], qty: (items[at].qty || 0) + n }; else items.push(item);
+  return { shop: { ...shop, items, purse: addCoins(purseOf(shop), paid, -1) }, cp, paid, item: at >= 0 ? items[at] : item };
 }

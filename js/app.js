@@ -46,6 +46,7 @@ function playerView() {
       // only what's on the shelf, at the price the party pays (haggled only once they've won it)
       items: s.items.filter(i => i.qty == null || i.qty > 0).filter(i => i.value).map(i => ({ id: i.id, n: i.name, q: i.qty ?? null, p: R.sellPrice(s, i, s.haggleWon), band: i.band, magic: !!i.magic, d: String(i.desc || '').slice(0, 240) })),
       buys: s.items.filter(i => i.value).map(i => ({ n: i.name, p: R.buyPrice(s, i, s.haggleWon) })),
+      ...(s.type === R.GENERAL ? { buysAll: true, offers: (s.offers || []).map(o => ({ id: o.id, n: o.name, p: o.cp, who: o.who || '', no: !!o.refused })) } : {}),
     })),
   };
 }
@@ -71,6 +72,32 @@ async function listenToPlayers() {
         ans = { ok: true, cp: r.cp, give: r.give, change: r.change };
         toast(`${req.who || 'A player'} bought ${r.item.name} at ${shopTitle(l.shops[i])}.`);
       }
+    } else if (req.kind === 'quote') {
+      // the General Store's offer for something it doesn't stock: from your lists, or you name a price
+      const sh = l.shops[i], cp = priceGuess(sh, req.name);
+      const off = (sh.offers || []).find(o => o.name.toLowerCase() === String(req.name).toLowerCase() && (!o.who || o.who === req.who));
+      if (off) ans = off.refused ? { ok: true, refused: true } : { ok: true, quote: off.cp, offerId: off.id };
+      else if (cp) ans = { ok: true, quote: cp };
+      else {
+        S.appraisals = (S.appraisals || []).filter(a => !(a.shopId === sh.id && a.name.toLowerCase() === String(req.name).toLowerCase() && a.who === req.who));
+        S.appraisals.push({ id: rid, uid, who: req.who || '', loc: l.id, shopId: sh.id, name: String(req.name || '').slice(0, 100), at: Date.now() });
+        ans = { ok: true, pending: true };
+        toast(`${req.who || 'A player'} wants an offer for ${req.name} at ${shopTitle(sh)}.`);
+      }
+    } else if (req.kind === 'sell' && l.shops[i].type === R.GENERAL && !l.shops[i].items.some(x => x.value && x.name.toLowerCase() === String(req.name).toLowerCase())) {
+      const sh = l.shops[i], n = Math.max(1, Number(req.n) || 1);
+      const off = (sh.offers || []).find(o => o.id === req.offerId && !o.refused);
+      const each = off ? off.cp : priceGuess(sh, req.name);
+      const r = each ? R.purchaseAny(sh, req.name, n, each) : { error: 'Ask the store for an offer first.' };
+      if (r.error) ans = { error: r.error };
+      else {
+        l.shops[i] = { ...r.shop, offers: (sh.offers || []).filter(o => o !== off), log: [...(r.shop.log || []), `${req.who || 'A player'} sold ${req.name} for ${R.purseText(r.paid)}`].slice(-40) };
+        ans = { ok: true, cp: r.cp, paid: r.paid };
+        toast(`${req.who || 'A player'} sold ${req.name} to ${shopTitle(l.shops[i])}.`);
+      }
+    } else if (req.kind === 'decline') {
+      l.shops[i] = { ...l.shops[i], offers: (l.shops[i].offers || []).filter(o => o.id !== req.offerId) };
+      ans = { ok: true };
     } else if (req.kind === 'sell') {
       const r = R.purchase(l.shops[i], req.name, Math.max(1, Number(req.n) || 1));
       if (r.error) ans = { error: r.error };
@@ -81,8 +108,35 @@ async function listenToPlayers() {
       }
     } else ans = { error: 'Unknown request.' };
     try { await T.answerShop(await tablePass(), tid, uid, rid, ans); } catch (e) { console.warn('answer', e); }
-    if (ans.ok) { await save(); if (ui.view !== 'home') render(); }
+    if (ans.ok) { await save(); render(); }
   });
+}
+
+// What the General Store pays for something it doesn't stock: half its price in your lists (or the SRD's), in copper
+function priceGuess(shop, name) {
+  const want = String(name || '').trim().toLowerCase(); if (!want) return 0;
+  const own = shop.items.find(x => x.value && x.name.toLowerCase() === want);
+  if (own) return R.buyPrice(shop, own, shop.haggleWon);
+  const lists = [...(usingMine() ? Object.values(LIB.shops || {}).map(x => x.items || []) : []), ...Object.values(SRD_SHOPS[edition()] || {})];
+  for (const list of lists) { const it = list.find(x => Number(x.value) && x.name.toLowerCase() === want); if (it) return R.buyPrice(shop, it, shop.haggleWon); }
+  return 0;
+}
+// Things players brought to a General Store that need your price
+function appraisalsCard(only) {
+  const list = (S.appraisals || []).filter(a => !only || a.loc === only);
+  if (!list.length) return '';
+  return `<div class="card" style="border-color:var(--ac)"><h3 style="margin-top:0">Waiting for your offer</h3><p class="mu small">Your players want to sell these to a General Store, and your lists don't have a price for them. Offer what the store pays for one (it buys at half value, so think of half what it's worth).</p>
+    ${list.map(a => { const l = S.locations.find(x => x.id === a.loc), sh = l?.shops.find(x => x.id === a.shopId); return `<div class="row" style="margin:6px 0"><span class="grow"><b>${esc(a.name)}</b><br><span class="mu small">${esc(a.who || 'A player')} · ${esc(sh ? shopTitle(sh) : 'General Store')}${l ? `, ${esc(l.name)}` : ''}</span></span>
+      <input class="n" data-ap="${a.id}" placeholder="gp" inputmode="decimal" aria-label="Offer in gp"><button class="sm pri" data-apo="${a.id}">Offer</button><button class="sm" data-apn="${a.id}">Won't buy</button></div>`; }).join('')}</div>`;
+}
+function bindAppraisals(app) {
+  const done = (a, offer) => {
+    const l = S.locations.find(x => x.id === a.loc), sh = l?.shops.find(x => x.id === a.shopId);
+    if (sh) sh.offers = [...(sh.offers || []).filter(o => !(o.name.toLowerCase() === a.name.toLowerCase() && o.who === a.who)), { id: uid(), name: a.name, who: a.who, ...offer }];
+    S.appraisals = S.appraisals.filter(x => x !== a); save(); render();
+  };
+  app.querySelectorAll('[data-apo]').forEach(b => { b.onclick = () => { const a = S.appraisals.find(x => x.id === b.dataset.apo), gp = Number(app.querySelector(`[data-ap="${b.dataset.apo}"]`).value); if (!(gp > 0)) return toast('Type an offer in gp, or tap Won\'t buy.'); done(a, { cp: Math.round(gp * 100) }); toast(`Offer sent: ${a.who || 'the player'} sees it at the store.`); }; });
+  app.querySelectorAll('[data-apn]').forEach(b => { b.onclick = () => { const a = S.appraisals.find(x => x.id === b.dataset.apn); done(a, { cp: 0, refused: true }); }; });
 }
 
 /* ---------- item lists: the DM's own, or the SRD's for the table's edition ---------- */
@@ -116,7 +170,7 @@ async function sync(interactive) {
     // the newer copy of your lists wins (edited here, or on another device)
     if (lib?.app === 'dmp-shops-library' && lib.shops && (!LIB || (lib.stamp || 0) >= (LIB.stamp || 0))) { LIB = lib; await idbPut('library', lib); }
     else if (LIB && (!lib || (LIB.stamp || 0) > (lib.stamp || 0))) await core.writeAppdata(t, LIB_FILE, LIB);
-    if (rem?.app === 'dmp-shops' && (rem.state?.stamp || 0) > (S.stamp || 0)) { S = normalize(rem.state); await idbPut('state', S); render(); }
+    if (rem?.app === 'dmp-shops' && (rem.state?.stamp || 0) > (S.stamp || 0)) { S = normalize(rem.state); if (S.locations.filter(l => ensureGeneral(l)).length) save(); await idbPut('state', S); render(); }
     else if (!rem || (S.stamp || 0) > (rem.state?.stamp || 0)) await core.writeAppdata(t, FILE, { app: 'dmp-shops', v: 1, state: S });
     pill(`✓ saved ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`);
   } catch (e) { pill(interactive ? `⚠ ${e.message}` : '● not synced'); if (interactive) toast(e.message); }
@@ -136,12 +190,17 @@ const qLabel = q => `Quality ${q}`;
 
 /* ---------- making towns and shops ---------- */
 function makeShop(type, l, q = null) {
-  const s = R.newShop(type, listFor(type), { q, maxQ: R.sizeOf(l.size).maxQ || 5, goldTable: goldTable(type) });
+  const s = R.newShop(type, listFor(type), { q, maxQ: R.qualityCap(l.size), goldTable: goldTable(type) });
   s.keeper = N.keeperFor(edition(), extraRaces());
   s.name = N.shopNameFor(type, s.keeper.name);
   return s;
 }
 const extraRaces = () => String(S.settings.races || '').split(',').map(x => x.trim()).filter(Boolean);
+// Every settlement has a General Store (towns made before this get one the first time they're opened)
+function ensureGeneral(l) {
+  if (l.shops.some(s => s.type === R.GENERAL)) return false;
+  l.shops.unshift(makeShop(R.GENERAL, l)); return true;
+}
 function rollTown(l) {
   const r = R.rollShops(l.size);
   l.shops = r.shops.map(t => makeShop(t, l));
@@ -166,12 +225,14 @@ function render() {
 function homeView(app) {
   const ls = S.locations;
   app.innerHTML = `
+  ${appraisalsCard()}
   <div class="card"><div class="row"><h2 class="grow">Towns</h2><button id="lists">📋 Shop lists</button><button class="pri" id="newLoc">+ New town</button></div>
     <p class="mu small">Each town keeps its own shops. Lists: ${usingMine() ? 'your own shop lists' : `the SRD's (${edition()} rules)`}.</p>
     <div class="grid">${ls.map(l => `<button class="tile" data-loc="${l.id}"><b>${esc(l.name)}</b><span class="mu">${esc(l.size)} · ${l.shops.filter(s => s.status !== 'closed').length} shops</span><br>${l.open ? '<span class="tag ok">Open to players</span>' : '<span class="tag">Closed to players</span>'}${l.partyHere ? '<span class="tag ac">Party is here</span>' : ''}</button>`).join('') || '<p class="mu">No towns yet.</p>'}</div></div>
   ${ls.length ? `<div class="card"><h3>A new month</h3><p class="mu small">Every shop in every town rolls its month: new quality and stock, what it sold and bought, and its stall or building countdown. You'll see a summary, and you can undo it.</p>
     <div class="row"><button class="pri" id="month">Start a new month</button>${S.undo ? `<button id="undo">Undo the last new month</button>` : ''}</div></div>` : ''}`;
   app.querySelectorAll('[data-loc]').forEach(b => { b.onclick = () => go('location', { loc: b.dataset.loc }); });
+  bindAppraisals(app);
   $('#newLoc').onclick = newTownDialog;
   $('#lists').onclick = () => go('lists');
   const m = $('#month'); if (m) m.onclick = () => newMonth();
@@ -186,7 +247,7 @@ function newTownDialog() {
     const mk = roll => {
       const name = $('#ln', m).value.trim(); if (!name) return toast('Give the town a name.');
       const l = { id: uid(), name, size: $('#ls', m).value, open: false, partyHere: false, shops: [], services: { Enchanter: '', 'Magic Item Dealer': '' } };
-      if (roll) rollTown(l);
+      if (roll) rollTown(l); else ensureGeneral(l);
       S.locations.push(l); save(); closeModal(); go('location', { loc: l.id });
     };
     $('#lr', m).onclick = () => mk(true); $('#le', m).onclick = () => mk(false); $('#lx', m).onclick = closeModal;
@@ -199,9 +260,9 @@ function locationView(app) {
     const v = l.services?.[t] || '';
     return `<div class="row"><b class="grow">${t}</b><select data-svc="${t}" style="width:auto"><option value="" ${!v ? 'selected' : ''}>Not in this town</option><option value="open" ${v === 'open' ? 'selected' : ''}>Here, open</option><option value="closed" ${v === 'closed' ? 'selected' : ''}>Here, closed</option></select></div>`;
   }).join('');
-  app.innerHTML = `
+  app.innerHTML = `${appraisalsCard(l.id)}
   <div class="card"><div class="row"><h2 class="grow">${esc(l.name)}</h2><button class="sm" id="ren">Rename</button></div>
-    <div class="row"><span class="tag">${esc(l.size)}</span><span class="tag">best quality ${sz.maxQ || '—'}</span><span class="tag">up to ${sz.maxShops} shops</span></div>
+    <div class="row"><span class="tag">${esc(l.size)}</span><span class="tag">best quality ${R.qualityCap(l.size)}</span><span class="tag">a General Store${sz.maxShops ? ` + up to ${sz.maxShops} shops` : ''}</span></div>
     <div class="row" style="margin-top:8px"><button id="open" aria-pressed="${!!l.open}">${l.open ? 'Open to players' : 'Closed to players'}</button><button id="here" aria-pressed="${!!l.partyHere}">${l.partyHere ? 'The party is here' : 'The party is elsewhere'}</button></div>
     <p class="mu small">Players see this town's shops while the party is here and it's open to them.</p></div>
   <div class="card"><div class="row"><h3 class="grow" style="margin:0">Shops</h3><button id="addShop">+ Add a shop</button><button id="reroll">Roll the town again</button></div>
@@ -210,6 +271,7 @@ function locationView(app) {
   <div class="card"><h3>At the table</h3><p class="mu small">Players only see whether these are here and open.</p>${svc}</div>
   <div class="card"><button class="bad" id="delLoc">Delete this town</button></div>`;
   app.querySelectorAll('[data-shop]').forEach(b => { b.onclick = () => go('shop', { shop: b.dataset.shop }); });
+  bindAppraisals(app);
   app.querySelectorAll('[data-svc]').forEach(s => { s.onchange = () => { l.services = { ...(l.services || {}), [s.dataset.svc]: s.value }; save(); }; });
   $('#open').onclick = () => { l.open = !l.open; save(); render(); };
   $('#here').onclick = () => { const v = !l.partyHere; S.locations.forEach(x => { x.partyHere = false; }); l.partyHere = v; save(); render(); };
@@ -446,12 +508,13 @@ function itemDialog(type, idx) {
 function newMonth() {
   if (!confirm('Start a new month in every town? Each shop rolls its quality and stock.')) return;
   S.undo = JSON.parse(JSON.stringify(S.locations));
+  S.appraisals = [];
   const report = [];
   for (const l of S.locations) {
     const sz = R.sizeOf(l.size);
     for (let i = 0; i < l.shops.length; i++) {
       const s = l.shops[i];
-      const r = R.monthFor(s, s.items, { maxQ: sz.maxQ || 5 });
+      const r = R.monthFor(s, s.items, { maxQ: R.qualityCap(l.size) });
       const ns = r.shop;
       const line = `Quality ${r.quality}${r.debt ? ' (started in debt: a bad month)' : ''}: sold ${r.sold.reduce((t, x) => t + x.n, 0)} items for ${R.money(r.made)}, bought ${r.bought.reduce((t, x) => t + x.n, 0)} for ${R.money(r.spent)}${r.change ? ` · ${r.change === 'closed' ? 'CLOSED' : r.change === 'upgraded' ? 'became a building' : 'dropped to a stall'}` : ''}`;
       ns.log = [...(s.log || []), line].slice(-24);
@@ -504,7 +567,7 @@ function settingsView(app) {
       if (o?.app !== 'dmp-shops-town' || !o.location) throw new Error("That isn't a town file.");
       const l = o.location;
       if (S.locations.some(x => x.name.toLowerCase() === l.name.toLowerCase()) && !confirm(`You already have a town called ${l.name}. Add this one as well?`)) return;
-      l.id = uid(); S.locations.push(l); await save(); toast(`${l.name} is in, with ${l.shops.length} shops.`); go('location', { loc: l.id });
+      l.id = uid(); ensureGeneral(l); S.locations.push(l); await save(); toast(`${l.name} is in, with ${l.shops.length} shops.`); go('location', { loc: l.id });
     } catch (err) { toast(err.message); }
   };
   $('#exp').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify({ app: 'dmp-shops', v: 1, state: S }, null, 1)], { type: 'application/json' })); a.download = `shops-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click(); };
@@ -519,6 +582,8 @@ window.addEventListener('dmp-suite', () => render());
   const [st, lib] = await Promise.all([idbGet('state'), idbGet('library')]);
   if (st) S = normalize(st);
   if (lib) LIB = lib;
+  const added = S.locations.filter(l => ensureGeneral(l)).map(l => l.name);
+  if (added.length) { save(); setTimeout(() => toast(`Every town has a General Store now: added one to ${added.join(', ')}.`), 800); }
   await coreReady;
   render();
   if (!isPlayer() && (core?.signedIn?.(core.SCOPES.appdata, { app: 'shops' }) || core?.staysSignedIn?.())) sync(false);
