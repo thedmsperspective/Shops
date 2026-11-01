@@ -521,6 +521,14 @@ function newMonth() {
       l.shops[i] = ns;
       if (s.status !== 'closed') report.push({ town: l.name, shop: shopTitle(ns), line, change: r.change });
     }
+    // room for more? one new shop may open, as a stall (Quality 1–2)
+    const t = R.rollNewShop(l.size, l.shops);
+    if (t) {
+      const ns = makeShop(t, l, R.rollQuality(Math.min(2, R.qualityCap(l.size))));
+      ns.form = 'stall'; ns.log = ['Opened as a stall'];
+      l.shops.push(ns);
+      report.push({ town: l.name, shop: shopTitle(ns), line: `NEW: a ${t} opened, as a stall at Quality ${ns.quality}`, change: 'opened' });
+    }
   }
   save();
   modal(`<h2>A new month</h2>${report.length ? `<ul class="log">${report.map(x => `<li><b>${esc(x.town)}, ${esc(x.shop)}</b>: ${esc(x.line)}</li>`).join('')}</ul>` : '<p class="mu">No open shops.</p>'}
