@@ -18,6 +18,17 @@ async function loadChars() {
   return chars;
 }
 const me = () => chars.find(c => c.id === charId);
+// Has this character earned the shop's haggle discount? (the DM ticks them off, one by one)
+const wonBy = (shop, c) => shop.haggle?.kind !== 'none' && (shop.won || []).some(w => w === '*' || w === (c?.name || ''));
+const priceOf = (x, shop, c) => (wonBy(shop, c) && x.hp != null ? x.hp : x.p);
+function haggleLine(shop, c) {
+  const h = shop.haggle || {};
+  if (!h.kind || h.kind === 'none') return '<p class="mu small">This shopkeeper won\'t haggle.</p>';
+  if (wonBy(shop, c)) return `<p class="small"><span class="tag ok">✓ ${h.off}% off for you this month</span></p>`;
+  return h.kind === 'roll'
+    ? `<p class="small">🎲 <b>Haggle:</b> ${esc(h.skill || 'Persuasion')} DC ${h.dc} for ${h.off}% off, just for you, this month. Tell your DM if you want to try.</p>`
+    : `<p class="small">🤝 <b>The shopkeeper asks a favor:</b> ${esc(h.favor)} <b>Do it, and you get ${h.off}% off</b> this month. Talk to your DM.</p>`;
+}
 const n = v => Number(v) || 0;
 const purseOfChar = c => ({ pp: n(c?.coins?.pp), gp: n(c?.coins?.gp), sp: n(c?.coins?.sp), cp: n(c?.coins?.cp) });
 
@@ -46,16 +57,16 @@ function draw() {
   if (!shop) {
     app.innerHTML = `<div class="card"><h2>${esc(view.town)}</h2>${who}${svc ? `<p class="small">Also in town (ask your DM): ${svc}</p>` : ''}</div>
       <div class="grid">${view.shops.map(s => `<button class="tile ${s.status === 'closed' ? 'closed' : ''}" data-shop="${s.id}"><b>${esc(s.name)}</b><span class="mu">${esc(s.type)}</span><br>
-        <span class="small">${esc(s.keeper?.name || '')}${s.keeper?.race ? `, ${esc([s.keeper.gender, s.keeper.race].filter(Boolean).join(' '))}` : ''}</span>${s.status === 'closed' ? '<br><span class="tag bad">Closed</span>' : ''}${s.haggled ? '<br><span class="tag ok">Haggled prices</span>' : ''}</button>`).join('')}</div>`;
+        <span class="small">${esc(s.keeper?.name || '')}${s.keeper?.race ? `, ${esc([s.keeper.gender, s.keeper.race].filter(Boolean).join(' '))}` : ''}</span>${s.status === 'closed' ? '<br><span class="tag bad">Closed</span>' : ''}${wonBy(s, c) ? '<br><span class="tag ok">Your haggled prices</span>' : ''}</button>`).join('')}</div>`;
     app.querySelectorAll('[data-shop]').forEach(b => { b.onclick = () => { open = b.dataset.shop; tab = 'buy'; draw(); window.scrollTo(0, 0); }; });
   } else {
     const bands = R.BANDS.map((b, i) => ({ b, items: shop.items.filter(x => x.band === i) })).filter(g => g.items.length);
     const mine = sellable(shop, c);
     app.innerHTML = `<div class="card"><div class="row"><button class="sm" id="out">← ${esc(view.town)}</button></div>
-      <h2>${esc(shop.name)}</h2><p class="mu">${esc(shop.type)} · ${esc(shop.keeper?.name || '')}${shop.keeper?.race ? `, ${esc([shop.keeper.gender, shop.keeper.race].filter(Boolean).join(' '))}` : ''}${shop.haggled ? ' · <span class="tag ok">Haggled prices</span>' : ''}</p>${who}
+      <h2>${esc(shop.name)}</h2><p class="mu">${esc(shop.type)} · ${esc(shop.keeper?.name || '')}${shop.keeper?.race ? `, ${esc([shop.keeper.gender, shop.keeper.race].filter(Boolean).join(' '))}` : ''}</p>${haggleLine(shop, c)}${who}
       <div class="row"><button id="tbuy" aria-pressed="${tab === 'buy'}">Buy</button><button id="tsell" aria-pressed="${tab === 'sell'}">Sell</button></div></div>
       ${shop.status === 'closed' ? '<div class="warn">This shop is closed.</div>' : tab === 'buy' ? `<div class="card"><table class="stock"><thead><tr><th>Item</th><th class="num">In stock</th><th class="num">Price</th><th></th></tr></thead><tbody>
-        ${bands.map(g => `<tr class="band"><td colspan="4">${g.b} Quality</td></tr>${g.items.map(it => `<tr><td>${esc(it.n)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.d ? `<br><small class="mu">${esc(it.d)}</small>` : ''}</td><td class="num">${it.q == null ? '∞' : it.q}</td><td class="num">${R.money(it.p)}</td><td><button class="sm pri" data-buy="${it.id}" ${busy || !c ? 'disabled' : ''}>Buy</button></td></tr>`).join('')}`).join('') || '<tr><td class="mu">Nothing on the shelf right now.</td></tr>'}
+        ${bands.map(g => `<tr class="band"><td colspan="4">${g.b} Quality</td></tr>${g.items.map(it => `<tr><td>${esc(it.n)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.d ? `<br><small class="mu">${esc(it.d)}</small>` : ''}</td><td class="num">${it.q == null ? '∞' : it.q}</td><td class="num">${R.money(priceOf(it, shop, c))}</td><td><button class="sm pri" data-buy="${it.id}" ${busy || !c ? 'disabled' : ''}>Buy</button></td></tr>`).join('')}`).join('') || '<tr><td class="mu">Nothing on the shelf right now.</td></tr>'}
       </tbody></table></div>` : `<div class="card"><p class="mu small">${shop.buysAll ? `${esc(shop.name)} buys almost anything. For things it doesn't stock, ask for an offer.` : `${esc(shop.name)} only buys the kinds of things it sells.`}</p>
         ${mine.length ? `<table class="stock"><thead><tr><th>Your item</th><th class="num">You have</th><th class="num">They pay</th><th></th></tr></thead><tbody>${mine.map(x => `<tr><td>${esc(x.row.name)}</td><td class="num">${n(x.row.qty) || 1}</td>
           <td class="num">${x.p != null ? R.money(x.p) : x.offer?.no ? '<span class="tag bad">Won\'t buy</span>' : x.waiting ? '<span class="tag">Waiting for an offer</span>' : '<span class="mu">—</span>'}</td>
@@ -82,7 +93,7 @@ function sellable(shop, c) {
     const nm = String(row.name || '').trim(); if (!nm) return;
     if (!(row.qty === '' || row.qty == null || n(row.qty) > 0)) return;
     const b = buys.get(nm.toLowerCase());
-    if (b) { out.push({ key: `${cat}.${i}`, cat, i, row, p: b.p, name: b.n }); return; }
+    if (b) { out.push({ key: `${cat}.${i}`, cat, i, row, p: priceOf(b, shop, c), name: b.n }); return; }
     if (!shop.buysAll) return;
     const o = offers.find(x => x.n.toLowerCase() === nm.toLowerCase());
     out.push({ key: `${cat}.${i}`, cat, i, row, name: nm, p: o && !o.no ? o.p : null, offer: o || null, waiting: !o && asked.has(askKey(c, nm)) });
@@ -103,7 +114,7 @@ async function ask(req) {
 }
 async function buy(shop, it) {
   const c = me(); if (!c || !it) return;
-  if (R.purseCp(purseOfChar(c)) < it.p) { toast("You don't have enough coin for that."); return; }
+  if (R.purseCp(purseOfChar(c)) < priceOf(it, shop, c)) { toast("You don't have enough coin for that."); return; }
   const r = await ask({ kind: 'buy', shopId: shop.id, itemId: it.id, n: 1, purse: purseOfChar(c), who: c.name || '' });
   if (r.error) { toast(r.error); draw(); return; }
   await changeSheet(c.id, x => {

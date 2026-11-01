@@ -4,6 +4,7 @@ import * as R from './rules.js';
 import * as N from './names.js';
 import { SRD_SHOPS } from './srd-shops.js';
 import { startPlayer } from './player.js';
+import { favorFor } from './favors.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -41,11 +42,13 @@ function playerView() {
   return {
     town: l.name, size: l.size, services: l.services || {}, t: Date.now(),
     shops: l.shops.map(s => ({
-      id: s.id, name: shopTitle(s), type: s.type, status: s.status, haggled: !!s.haggleWon,
+      id: s.id, name: shopTitle(s), type: s.type, status: s.status,
+      haggle: { kind: R.haggleKind(s), skill: s.haggle?.skill || 'Persuasion', dc: s.haggle?.dc || 0, off: s.haggle?.off || 0, favor: s.haggle?.favor || '' },
+      won: s.haggleWon === true ? ['*'] : (s.haggleBy || []),
       keeper: { name: s.keeper?.name || '', race: s.keeper?.race || '', gender: s.keeper?.gender || '' },
       // only what's on the shelf, at the price the party pays (haggled only once they've won it)
-      items: s.items.filter(i => i.qty == null || i.qty > 0).filter(i => i.value).map(i => ({ id: i.id, n: i.name, q: i.qty ?? null, p: R.sellPrice(s, i, s.haggleWon), band: i.band, magic: !!i.magic, d: String(i.desc || '').slice(0, 240) })),
-      buys: s.items.filter(i => i.value).map(i => ({ n: i.name, p: R.buyPrice(s, i, s.haggleWon) })),
+      items: s.items.filter(i => i.qty == null || i.qty > 0).filter(i => i.value).map(i => ({ id: i.id, n: i.name, q: i.qty ?? null, p: R.sellPrice(s, i), hp: R.sellPrice(s, i, true), band: i.band, magic: !!i.magic, d: String(i.desc || '').slice(0, 240) })),
+      buys: s.items.filter(i => i.value).map(i => ({ n: i.name, p: R.buyPrice(s, i), hp: R.buyPrice(s, i, true) })),
       ...(s.type === R.GENERAL ? { buysAll: true, offers: (s.offers || []).map(o => ({ id: o.id, n: o.name, p: o.cp, who: o.who || '', no: !!o.refused })) } : {}),
     })),
   };
@@ -61,11 +64,12 @@ async function listenToPlayers() {
   const T = await core.tables(); const tid = core.currentTable().id;
   stopReq = T.watchShopRequests(await tablePass(), tid, async ({ uid, rid, req }) => {
     const l = S.locations.find(x => x.partyHere && x.open), i = l ? l.shops.findIndex(s => s.id === req.shopId) : -1;
+    if (req.who && !(S.knownWho || []).includes(req.who)) S.knownWho = [...(S.knownWho || []), req.who].slice(-30);
     let ans;
     if (!l || i < 0) ans = { error: "That shop isn't open to you right now." };
     else if (l.shops[i].status === 'closed') ans = { error: 'That shop is closed.' };
     else if (req.kind === 'buy') {
-      const r = R.sale(l.shops[i], req.itemId, Math.max(1, Number(req.n) || 1), req.purse || {});
+      const r = R.sale(l.shops[i], req.itemId, Math.max(1, Number(req.n) || 1), req.purse || {}, req.who || '');
       if (r.error) ans = { error: r.error };
       else {
         l.shops[i] = { ...r.shop, log: [...(r.shop.log || []), `${req.who || 'A player'} bought ${r.item.name} for ${R.money(r.cp)}`].slice(-40) };
@@ -74,7 +78,7 @@ async function listenToPlayers() {
       }
     } else if (req.kind === 'quote') {
       // the General Store's offer for something it doesn't stock: from your lists, or you name a price
-      const sh = l.shops[i], cp = priceGuess(sh, req.name);
+      const sh = l.shops[i], cp = priceGuess(sh, req.name, req.who);
       const off = (sh.offers || []).find(o => o.name.toLowerCase() === String(req.name).toLowerCase() && (!o.who || o.who === req.who));
       if (off) ans = off.refused ? { ok: true, refused: true } : { ok: true, quote: off.cp, offerId: off.id };
       else if (cp) ans = { ok: true, quote: cp };
@@ -87,7 +91,7 @@ async function listenToPlayers() {
     } else if (req.kind === 'sell' && l.shops[i].type === R.GENERAL && !l.shops[i].items.some(x => x.value && x.name.toLowerCase() === String(req.name).toLowerCase())) {
       const sh = l.shops[i], n = Math.max(1, Number(req.n) || 1);
       const off = (sh.offers || []).find(o => o.id === req.offerId && !o.refused);
-      const each = off ? off.cp : priceGuess(sh, req.name);
+      const each = off ? off.cp : priceGuess(sh, req.name, req.who);
       const r = each ? R.purchaseAny(sh, req.name, n, each) : { error: 'Ask the store for an offer first.' };
       if (r.error) ans = { error: r.error };
       else {
@@ -99,7 +103,7 @@ async function listenToPlayers() {
       l.shops[i] = { ...l.shops[i], offers: (l.shops[i].offers || []).filter(o => o.id !== req.offerId) };
       ans = { ok: true };
     } else if (req.kind === 'sell') {
-      const r = R.purchase(l.shops[i], req.name, Math.max(1, Number(req.n) || 1));
+      const r = R.purchase(l.shops[i], req.name, Math.max(1, Number(req.n) || 1), req.who || '');
       if (r.error) ans = { error: r.error };
       else {
         l.shops[i] = { ...r.shop, log: [...(r.shop.log || []), `${req.who || 'A player'} sold ${r.item.name} for ${R.purseText(r.paid)}`].slice(-40) };
@@ -113,12 +117,13 @@ async function listenToPlayers() {
 }
 
 // What the General Store pays for something it doesn't stock: half its price in your lists (or the SRD's), in copper
-function priceGuess(shop, name) {
+function priceGuess(shop, name, who = '') {
   const want = String(name || '').trim().toLowerCase(); if (!want) return 0;
+  const hag = R.haggledFor(shop, who);
   const own = shop.items.find(x => x.value && x.name.toLowerCase() === want);
-  if (own) return R.buyPrice(shop, own, shop.haggleWon);
+  if (own) return R.buyPrice(shop, own, hag);
   const lists = [...(usingMine() ? Object.values(LIB.shops || {}).map(x => x.items || []) : []), ...Object.values(SRD_SHOPS[edition()] || {})];
-  for (const list of lists) { const it = list.find(x => Number(x.value) && x.name.toLowerCase() === want); if (it) return R.buyPrice(shop, it, shop.haggleWon); }
+  for (const list of lists) { const it = list.find(x => Number(x.value) && x.name.toLowerCase() === want); if (it) return R.buyPrice(shop, it, hag); }
   return 0;
 }
 // Things players brought to a General Store that need your price
@@ -189,8 +194,15 @@ const shopTitle = s => s.name || s.type;
 const qLabel = q => `Quality ${q}`;
 
 /* ---------- making towns and shops ---------- */
+// A shop asking a favor gets one suggested, one not handed out lately
+function fillFavor(s) {
+  if (s.haggle?.kind !== 'favor' || s.haggle.favor) return;
+  s.haggle.favor = favorFor(s.type, S.usedFavors || []);
+  S.usedFavors = [...(S.usedFavors || []), s.haggle.favor].slice(-300);
+}
 function makeShop(type, l, q = null) {
   const s = R.newShop(type, listFor(type), { q, maxQ: R.qualityCap(l.size), goldTable: goldTable(type) });
+  fillFavor(s);
   s.keeper = N.keeperFor(edition(), extraRaces());
   s.name = N.shopNameFor(type, s.keeper.name);
   return s;
@@ -267,7 +279,7 @@ function locationView(app) {
     <p class="mu small">Players see this town's shops while the party is here and it's open to them.</p></div>
   <div class="card"><div class="row"><h3 class="grow" style="margin:0">Shops</h3><button id="addShop">+ Add a shop</button><button id="reroll">Roll the town again</button></div>
     <div class="grid" style="margin-top:8px">${l.shops.map(s => `<button class="tile ${s.status === 'closed' ? 'closed' : ''}" data-shop="${s.id}"><b>${esc(shopTitle(s))}</b><span class="mu">${esc(s.type)} · ${qLabel(s.quality)} · ${s.form === 'building' ? 'Building' : 'Stall'}</span><br>
-      ${s.status === 'closed' ? '<span class="tag bad">Closed</span>' : ''}${s.haggleWon ? '<span class="tag ok">Haggled</span>' : ''}${countdown(s)}<span class="tag ${R.shopCp(s) < 0 ? 'bad' : ''}">${R.shopCp(s) < 0 ? 'In debt ' : ''}${R.money(R.shopCp(s), { short: true })}</span></button>`).join('') || '<p class="mu">No shops yet.</p>'}</div></div>
+      ${s.status === 'closed' ? '<span class="tag bad">Closed</span>' : ''}${s.haggleWon || (s.haggleBy || []).length ? '<span class="tag ok">Haggled</span>' : ''}${countdown(s)}<span class="tag ${R.shopCp(s) < 0 ? 'bad' : ''}">${R.shopCp(s) < 0 ? 'In debt ' : ''}${R.money(R.shopCp(s), { short: true })}</span></button>`).join('') || '<p class="mu">No shops yet.</p>'}</div></div>
   <div class="card"><h3>At the table</h3><p class="mu small">Players only see whether these are here and open.</p>${svc}</div>
   <div class="card"><button class="bad" id="delLoc">Delete this town</button></div>`;
   app.querySelectorAll('[data-shop]').forEach(b => { b.onclick = () => go('shop', { shop: b.dataset.shop }); });
@@ -313,10 +325,11 @@ function shopView(app) {
     <div class="stats">
       <div class="stat" style="grid-column:span 2"><small>${R.shopCp(s) < 0 ? 'In debt' : 'Coins on hand'} · worth ${R.money(R.shopCp(s))}</small><b style="${R.shopCp(s) < 0 ? 'color:#f1b0a5' : ''}">${esc(R.purseText(R.purseOf(s)))}</b></div>
       <div class="stat"><small>Prices</small><b>${Math.round((s.priceMod || 1) * 100)}%</b></div>
-      <div class="stat"><small>Haggling</small><b>${s.haggle?.dc ? `DC ${s.haggle.dc}, ${s.haggle.off}% off` : "Won't haggle"}</b></div>
+      <div class="stat"><small>Haggling</small><b>${R.haggleKind(s) === 'roll' ? `${esc(s.haggle.skill || 'Persuasion')} DC ${s.haggle.dc}, ${s.haggle.off}% off` : R.haggleKind(s) === 'favor' ? `A favor, ${s.haggle.off}% off` : "Won't haggle"}</b></div>
       <div class="stat"><small>Started at</small><b>${qLabel(s.startQuality || s.quality)}</b></div></div>
-    <div class="row">${s.haggle?.dc ? `<button id="haggle" aria-pressed="${!!s.haggleWon}">${s.haggleWon ? '✓ Haggle succeeded (whole party, this month)' : 'Haggle succeeded'}</button>` : ''}<button id="gold">Change coins</button>
+    <div class="row"><button id="gold">Change coins</button>
       <button id="status">${s.status === 'closed' ? 'Reopen the shop' : 'Close the shop'}</button></div></div>
+  ${haggleCard(s)}
   <div class="card"><div class="row"><h3 class="grow" style="margin:0">On the shelf</h3><button id="addItem">+ Add an item</button><button id="restockNow">Roll this shop's stock again</button></div>
     <p class="mu small">Price is what the shop charges (with its ${Math.round((s.priceMod || 1) * 100)}%); it buys at half value. Faded items aren't on the shelf this month.</p>
     <table class="stock"><thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Price</th><th class="num hide-s">Buys at</th><th></th></tr></thead>
@@ -339,7 +352,7 @@ function shopView(app) {
   });
   $('#rollShopName').onclick = () => { s.name = N.shopNameFor(s.type, k2.name); save(); render(); };
   $('#rename').onclick = () => { const n = prompt('Shop name', s.name || ''); if (n != null) { s.name = n.trim(); save(); render(); } };
-  const h = $('#haggle'); if (h) h.onclick = () => { s.haggleWon = !s.haggleWon; save(); render(); };
+  bindHaggle(app, s);
   $('#gold').onclick = () => {
     const p = R.purseOf(s);
     modal(`<h2>Coins on hand</h2><div class="row">${R.COINS.map(c => `<div class="grow"><label>${c}</label><input data-coin="${c}" value="${p[c] || 0}" inputmode="numeric"></div>`).join('')}</div>
@@ -380,6 +393,49 @@ function addItemDialog(s) {
       s.items.push(it); save(); closeModal(); render();
     };
   });
+}
+
+/* ---------- haggling: a skill check or a favor, earned character by character ---------- */
+// The party's characters, for ticking off who earned a shop's discount: your Character Sheet party, and anyone who's shopped
+function partyNames() {
+  const names = new Set();
+  try { for (const c of core?.party?.() || []) if (c.name) names.add(c.name); } catch { /* */ }
+  for (const n of S.knownWho || []) names.add(n);
+  return [...names];
+}
+function haggleCard(s) {
+  const k = R.haggleKind(s), h = s.haggle || {};
+  if (s.haggleWon === true) { s.haggleBy = partyNames(); delete s.haggleWon; }
+  const won = new Set(s.haggleBy || []), names = [...new Set([...partyNames(), ...won])];
+  return `<div class="card"><div class="row"><h3 class="grow" style="margin:0">Haggling this month</h3>
+      <select id="hk" style="width:auto">${[['roll', '🎲 Skill check'], ['favor', '🤝 A favor'], ['none', "🚫 Won't haggle"]].map(([v, n]) => `<option value="${v}" ${k === v ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
+    ${k === 'roll' ? `<div class="row"><div><label>Skill</label><select id="hs">${R.HAGGLE_SKILLS.map(x => `<option ${(h.skill || 'Persuasion') === x ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
+      <div><label>DC</label><input class="n" id="hdc" inputmode="numeric" value="${h.dc || 15}"></div><div><label>% off</label><input class="n" id="hoff" inputmode="numeric" value="${h.off || 10}"></div></div>` : ''}
+    ${k === 'favor' ? `<label>What the shopkeeper asks</label><textarea id="hf">${esc(h.favor || '')}</textarea>
+      <div class="row"><button class="sm" id="hnew">🎲 Suggest another</button><div><label style="display:inline;margin-right:6px">% off</label><input class="n" id="hoff" inputmode="numeric" value="${h.off || 15}"></div></div>` : ''}
+    ${k !== 'none' ? `<label>Who earned it (their prices drop, everyone else pays full price, until the month turns)</label>
+      <div class="row">${names.map(n => `<button class="sm" data-won="${esc(n)}" aria-pressed="${won.has(n)}">${won.has(n) ? '✓ ' : ''}${esc(n)}</button>`).join('') || '<span class="mu small">No characters yet.</span>'}
+      <input id="hadd" placeholder="Add a character" style="width:160px"></div>` : ''}
+    <p class="mu small">Players see what it takes${k === 'roll' ? ' (the skill and DC)' : k === 'favor' ? ' (the favor)' : ''} and the discount, and their own price once you tick them.</p></div>`;
+}
+function bindHaggle(app, s) {
+  const h = () => (s.haggle = s.haggle || { kind: 'none', dc: 0, off: 0 });
+  const k = $('#hk', app); if (!k) return;
+  k.onchange = () => {
+    const x = h(); x.kind = k.value;
+    if (x.kind === 'roll') { x.dc = x.dc || 15; x.off = x.off || 10; x.skill = x.skill || 'Persuasion'; }
+    if (x.kind === 'favor') { x.off = x.off || 15; x.favor = x.favor || ''; fillFavor(s); }
+    if (x.kind === 'none') s.haggleBy = [];
+    save(); render();
+  };
+  const on = (id, f) => { const el = $(id, app); if (el) el.onchange = () => { f(el.value); save(); }; };
+  on('#hs', v => { h().skill = v; });
+  on('#hdc', v => { h().dc = Math.max(1, parseInt(v, 10) || 0); });
+  on('#hoff', v => { h().off = Math.max(0, Math.min(100, parseInt(v, 10) || 0)); render(); });
+  on('#hf', v => { h().favor = v.trim(); });
+  const nw = $('#hnew', app); if (nw) nw.onclick = () => { h().favor = ''; fillFavor(s); save(); render(); };
+  app.querySelectorAll('[data-won]').forEach(b => { b.onclick = () => { const n = b.dataset.won, w = new Set(s.haggleBy || []); if (w.has(n)) w.delete(n); else w.add(n); s.haggleBy = [...w]; save(); render(); }; });
+  const add = $('#hadd', app); if (add) add.onchange = () => { const n = add.value.trim(); if (!n) return; S.knownWho = [...new Set([...(S.knownWho || []), n])]; s.haggleBy = [...new Set([...(s.haggleBy || []), n])]; save(); render(); };
 }
 
 /* ---------- the master lists: every shop type and every item it can carry ---------- */
@@ -515,7 +571,7 @@ function newMonth() {
     for (let i = 0; i < l.shops.length; i++) {
       const s = l.shops[i];
       const r = R.monthFor(s, s.items, { maxQ: R.qualityCap(l.size) });
-      const ns = r.shop;
+      const ns = r.shop; fillFavor(ns);
       const line = `Quality ${r.quality}${r.debt ? ' (started in debt: a bad month)' : ''}: sold ${r.sold.reduce((t, x) => t + x.n, 0)} items for ${R.money(r.made)}, bought ${r.bought.reduce((t, x) => t + x.n, 0)} for ${R.money(r.spent)}${r.change ? ` · ${r.change === 'closed' ? 'CLOSED' : r.change === 'upgraded' ? 'became a building' : 'dropped to a stall'}` : ''}`;
       ns.log = [...(s.log || []), line].slice(-24);
       l.shops[i] = ns;

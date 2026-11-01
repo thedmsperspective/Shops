@@ -33,12 +33,25 @@ export function rollQuality(maxQ = 5) {
   const r = d(20), q = r <= 2 ? 1 : r <= 6 ? 2 : r <= 12 ? 3 : r <= 17 ? 4 : 5;
   return Math.max(1, Math.min(q, maxQ || 5));
 }
-/** Haggling: a roll by quality decides the DC and the discount (or that this merchant won't haggle). */
-const HAGGLE = [null, null, { dc: 25, off: 5 }, { dc: 18, off: 10 }, { dc: 15, off: 15 }, { dc: 13, off: 20 }, { dc: 11, off: 25 }, null, null];
+/** Haggling, by quality: shabby shops nearly always deal and deal generously; fine ones rarely, and not by much.
+ *  When a shop will haggle, about 1 in 3 asks a favor instead of a skill check (and gives 5% more off for it).
+ *  Returns { kind: 'roll', skill, dc, off } | { kind: 'favor', favor: '', off } | { kind: 'none', dc: 0, off: 0 }. */
+const HAGGLE_ODDS = [1, 0.9, 0.75, 0.5, 1 / 3];
+const HAGGLE_DC = [[10, 13], [12, 15], [13, 17], [15, 18], [17, 20]];
+const HAGGLE_OFF = [[15, 25], [10, 20], [10, 15], [5, 15], [5, 10]];
+export const HAGGLE_SKILLS = ['Persuasion', 'Deception', 'Intimidation'];
 export function rollHaggle(q) {
-  const r = q <= 2 ? between(2, 6) : q <= 4 ? between(1, 6) : between(1, 8);
-  return HAGGLE[r] ? { ...HAGGLE[r] } : { dc: 0, off: 0 };
+  const i = Math.max(1, Math.min(5, q || 1)) - 1;
+  if (rand() >= HAGGLE_ODDS[i]) return { kind: 'none', dc: 0, off: 0 };
+  const [lo, hi] = HAGGLE_OFF[i], off = 5 * between(lo / 5, hi / 5);
+  if (rand() < 1 / 3) return { kind: 'favor', favor: '', off: off + 5 };
+  const r = d(10);
+  return { kind: 'roll', skill: r <= 6 ? 'Persuasion' : r <= 8 ? 'Deception' : 'Intimidation', dc: between(...HAGGLE_DC[i]), off };
 }
+/** The kind of a shop's haggling (shops made before favors had just { dc, off }). */
+export const haggleKind = s => s?.haggle?.kind || (s?.haggle?.dc ? 'roll' : 'none');
+/** Has this character earned the shop's haggle discount this month? (who: the character's name) */
+export const haggledFor = (shop, who) => haggleKind(shop) !== 'none' && (shop.haggleWon === true || (shop.haggleBy || []).includes(who || ''));
 /** The whole shop's prices: 90%, 95%, 100%, 105% or 110%. */
 export const rollPriceMod = () => [0.9, 0.95, 1, 1.05, 1.1][d(5) - 1];
 /* ---------- coins: a shop keeps platinum, gold, silver and copper apart (a purse) ---------- */
@@ -144,7 +157,7 @@ export function newShop(type, list, { q = null, maxQ = 5, goldTable = null } = {
     id: uid(), type, quality, startQuality: quality,
     form: quality >= 3 ? 'building' : 'stall', // opened at 1–2: a stall; at 3+: a building
     lowRun: 0, highRun: 0, status: 'open',
-    purse: rollPurse(quality, goldTable), priceMod: rollPriceMod(), haggle: rollHaggle(quality), haggleWon: false,
+    purse: rollPurse(quality, goldTable), priceMod: rollPriceMod(), haggle: rollHaggle(quality), haggleWon: false, haggleBy: [],
     items: stockFor(list, quality), keeper: null, log: [],
   };
 }
@@ -184,7 +197,7 @@ export function rollNewShop(sizeKey, shops) {
 export function monthFor(shop, list, { maxQ = 5 } = {}) {
   if (shop.status === 'closed') return { shop, sold: [], bought: [], made: 0, spent: 0, quality: shop.quality, change: '' };
   const q = rollQuality(maxQ);
-  const next = { ...shop, quality: q, priceMod: rollPriceMod(), haggle: rollHaggle(q), haggleWon: false };
+  const next = { ...shop, quality: q, priceMod: rollPriceMod(), haggle: rollHaggle(q), haggleWon: false, haggleBy: [] };
   const fresh = stockFor(list, q, shop.items);
   const sold = [], bought = [];
   let made = 0, spent = 0;
@@ -221,11 +234,11 @@ export function monthFor(shop, list, { maxQ = 5 } = {}) {
  * A player buys n of an item with the coins in their purse: stock down, the player's coins into the shop's purse and
  * change back out of it. Returns { shop, cp, give, change, item } or { error }.
  */
-export function sale(shop, itemId, n, playerPurse) {
+export function sale(shop, itemId, n, playerPurse, who = '') {
   const it = shop.items.find(x => x.id === itemId);
   if (!it) return { error: "That item isn't here any more." };
   if (it.qty != null && it.qty < n) return { error: it.qty ? `They only have ${it.qty}.` : "It's sold out." };
-  const cp = n * sellPrice(shop, it, shop.haggleWon);
+  const cp = n * sellPrice(shop, it, haggledFor(shop, who));
   const pay = settle(playerPurse, purseOf(shop), cp);
   if (pay.error) return pay;
   const items = shop.items.map(x => (x.id === itemId ? { ...x, qty: x.qty == null ? null : x.qty - n, everSold: x.unique ? true : x.everSold } : x));
@@ -233,10 +246,10 @@ export function sale(shop, itemId, n, playerPurse) {
   return { shop: { ...shop, items, purse }, cp, give: pay.give, change: pay.change, item: it };
 }
 /** A player sells n of an item the shop stocks: stock up, and the shop pays from what it has (biggest coins first). */
-export function purchase(shop, name, n = 1) {
+export function purchase(shop, name, n = 1, who = '') {
   const it = shop.items.find(x => x.name.toLowerCase() === String(name).toLowerCase());
   if (!it) return { error: `${shop.name || shop.type} doesn't buy that.` };
-  const cp = n * buyPrice(shop, it, shop.haggleWon);
+  const cp = n * buyPrice(shop, it, haggledFor(shop, who));
   const paid = payFrom(purseOf(shop), cp);
   if (!paid) return { error: shopCp(shop) < cp ? `${shop.name || shop.type} can't afford it right now.` : `${shop.name || shop.type} doesn't have the right coins to pay that exactly.` };
   const items = shop.items.map(x => (x.id === it.id ? { ...x, qty: x.qty == null ? null : x.qty + n } : x));
