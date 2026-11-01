@@ -66,7 +66,7 @@ function draw() {
       <h2>${esc(shop.name)}</h2><p class="mu">${esc(shop.type)} · ${esc(shop.keeper?.name || '')}${shop.keeper?.race ? `, ${esc([shop.keeper.gender, shop.keeper.race].filter(Boolean).join(' '))}` : ''}</p>${haggleLine(shop, c)}${who}
       <div class="row"><button id="tbuy" aria-pressed="${tab === 'buy'}">Buy</button><button id="tsell" aria-pressed="${tab === 'sell'}">Sell</button></div></div>
       ${shop.status === 'closed' ? '<div class="warn">This shop is closed.</div>' : tab === 'buy' ? `<div class="card"><table class="stock"><thead><tr><th>Item</th><th class="num">In stock</th><th class="num">Price</th><th></th></tr></thead><tbody>
-        ${bands.map(g => `<tr class="band"><td colspan="4">${g.b} Quality</td></tr>${g.items.map(it => `<tr><td>${esc(it.n)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.d ? `<br><small class="mu">${esc(it.d)}</small>` : ''}</td><td class="num">${it.q == null ? '∞' : it.q}</td><td class="num">${R.money(priceOf(it, shop, c))}</td><td><button class="sm pri" data-buy="${it.id}" ${busy || !c ? 'disabled' : ''}>Buy</button></td></tr>`).join('')}`).join('') || '<tr><td class="mu">Nothing on the shelf right now.</td></tr>'}
+        ${bands.map(g => `<tr class="band"><td colspan="4">${g.b} Quality</td></tr>${g.items.map(it => `<tr><td>${esc(it.n)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.d ? `<br><small class="mu">${esc(it.d)}</small>` : ''}</td><td class="num">${it.q == null ? '∞' : it.q}</td><td class="num">${it.don ? '<span class="mu">By donation</span>' : R.money(priceOf(it, shop, c))}</td><td>${it.don ? `<button class="sm pri" data-don="${it.id}" ${busy || !c ? 'disabled' : ''}>Donate</button>` : `<button class="sm pri" data-buy="${it.id}" ${busy || !c ? 'disabled' : ''}>Buy</button>`}</td></tr>`).join('')}`).join('') || '<tr><td class="mu">Nothing on the shelf right now.</td></tr>'}
       </tbody></table></div>` : `<div class="card"><p class="mu small">${shop.buysAll ? `${esc(shop.name)} buys almost anything. For things it doesn't stock, ask for an offer.` : `${esc(shop.name)} only buys the kinds of things it sells.`}</p>
         ${mine.length ? `<table class="stock"><thead><tr><th>Your item</th><th class="num">You have</th><th class="num">They pay</th><th></th></tr></thead><tbody>${mine.map(x => `<tr><td>${esc(x.row.name)}</td><td class="num">${n(x.row.qty) || 1}</td>
           <td class="num">${x.p != null ? R.money(x.p) : x.offer?.no ? '<span class="tag bad">Won\'t buy</span>' : x.waiting ? '<span class="tag">Waiting for an offer</span>' : '<span class="mu">—</span>'}</td>
@@ -76,6 +76,7 @@ function draw() {
     $('#tsell').onclick = () => { tab = 'sell'; draw(); };
     app.querySelectorAll('[data-buy]').forEach(b => { b.onclick = () => buy(shop, shop.items.find(x => x.id === b.dataset.buy)); });
     app.querySelectorAll('[data-sell]').forEach(b => { b.onclick = () => sell(shop, mine.find(x => x.key === b.dataset.sell)); });
+    app.querySelectorAll('[data-don]').forEach(b => { b.onclick = () => donate(shop, shop.items.find(x => x.id === b.dataset.don)); });
     app.querySelectorAll('[data-ask]').forEach(b => { b.onclick = () => askOffer(shop, mine.find(x => x.key === b.dataset.ask)); });
     app.querySelectorAll('[data-no]').forEach(b => { b.onclick = async () => { const x = mine.find(y => y.key === b.dataset.no); const r = await ask({ kind: 'decline', shopId: shop.id, offerId: x.offer.id, name: x.name }); if (r.error) toast(r.error); draw(); }; });
   }
@@ -127,6 +128,19 @@ async function buy(shop, it) {
     return ['coins', `inv.${cat}`];
   });
   toast(`Bought ${it.n} for ${R.money(r.cp)}.${R.purseCp(r.change) ? ` Change: ${R.purseText(r.change)}.` : ''}`);
+}
+// By donation: the player gives what they choose, from the coins on their sheet
+async function donate(shop, it) {
+  const c = me(); if (!c || !it) return;
+  const v = prompt(`How much will you give for ${it.n}? (in gp; 0.5 is 5 sp)`, '1');
+  if (v == null) return;
+  const cp = Math.round((Number(String(v).replace(',', '.')) || 0) * 100);
+  if (cp < 1) { toast('Give at least 1 cp.'); return; }
+  if (R.purseCp(purseOfChar(c)) < cp) { toast("You don't have that much coin."); return; }
+  const r = await ask({ kind: 'donate', shopId: shop.id, itemId: it.id, cp, purse: purseOfChar(c), who: c.name || '' });
+  if (r.error) { toast(r.error); draw(); return; }
+  await changeSheet(c.id, x => { x.coins = { ...(x.coins || {}), ...R.addCoins(R.addCoins(purseOfChar(x), r.give, -1), r.change) }; return ['coins']; });
+  toast(`You gave ${R.money(r.cp)} for ${it.n}.${R.purseCp(r.change) ? ` Change: ${R.purseText(r.change)}.` : ''} Your DM sees it.`);
 }
 // The General Store: what would it pay for this? An offer at once (from the DM's lists), or the DM names one later
 async function askOffer(shop, x) {

@@ -47,7 +47,7 @@ function playerView() {
       won: s.haggleWon === true ? ['*'] : (s.haggleBy || []),
       keeper: { name: s.keeper?.name || '', race: s.keeper?.race || '', gender: s.keeper?.gender || '' },
       // only what's on the shelf, at the price the party pays (haggled only once they've won it)
-      items: s.items.filter(i => i.qty == null || i.qty > 0).filter(i => i.value).map(i => ({ id: i.id, n: i.name, q: i.qty ?? null, p: R.sellPrice(s, i), hp: R.sellPrice(s, i, true), band: i.band, magic: !!i.magic, d: String(i.desc || '').slice(0, 240) })),
+      items: s.items.filter(i => i.qty == null || i.qty > 0).filter(i => i.value || i.donation).map(i => ({ id: i.id, n: i.name, q: i.qty ?? null, p: i.donation ? 0 : R.sellPrice(s, i), hp: i.donation ? 0 : R.sellPrice(s, i, true), ...(i.donation ? { don: true } : {}), band: i.band, magic: !!i.magic, d: String(i.desc || '').slice(0, 240) })),
       buys: s.items.filter(i => i.value).map(i => ({ n: i.name, p: R.buyPrice(s, i), hp: R.buyPrice(s, i, true) })),
       ...(s.type === R.GENERAL ? { buysAll: true, offers: (s.offers || []).map(o => ({ id: o.id, n: o.name, p: o.cp, who: o.who || '', no: !!o.refused })) } : {}),
     })),
@@ -98,6 +98,14 @@ async function listenToPlayers() {
         l.shops[i] = { ...r.shop, offers: (sh.offers || []).filter(o => o !== off), log: [...(r.shop.log || []), `${req.who || 'A player'} sold ${req.name} for ${R.purseText(r.paid)}`].slice(-40) };
         ans = { ok: true, cp: r.cp, paid: r.paid };
         toast(`${req.who || 'A player'} sold ${req.name} to ${shopTitle(l.shops[i])}.`);
+      }
+    } else if (req.kind === 'donate') {
+      const r = R.donate(l.shops[i], req.itemId, req.cp, req.purse || {});
+      if (r.error) ans = { error: r.error };
+      else {
+        l.shops[i] = { ...r.shop, log: [...(r.shop.log || []), `${req.who || 'A player'} donated ${R.money(r.cp)} for ${r.item.name}`].slice(-40) };
+        ans = { ok: true, cp: r.cp, give: r.give, change: r.change };
+        toast(`${req.who || 'A player'} donated ${R.money(r.cp)} for ${r.item.name} at ${shopTitle(l.shops[i])}.`);
       }
     } else if (req.kind === 'decline') {
       l.shops[i] = { ...l.shops[i], offers: (l.shops[i].offers || []).filter(o => o.id !== req.offerId) };
@@ -311,9 +319,9 @@ function shopView(app) {
   if (other.length) bands.push({ b: 'Other', items: other });
   const row = it => {
     const sell = R.sellPrice(s, it), buy = R.buyPrice(s, it), none = it.qty === 0;
-    return `<tr class="${none ? 'none' : ''}"><td>${esc(it.name)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.unique ? ' <span class="tag">only one ever</span>' : ''}${!it.value ? ' <span class="tag bad">no price</span>' : ''}</td>
+    return `<tr class="${none ? 'none' : ''}"><td>${esc(it.name)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.unique ? ' <span class="tag">only one ever</span>' : ''}${it.donation ? ' <span class="tag ok">by donation</span>' : !it.value ? ' <span class="tag bad">no price</span>' : ''}</td>
       <td class="num">${it.qty == null ? '∞' : `<input class="n" data-qty="${it.id}" value="${it.qty}" inputmode="numeric" aria-label="How many">`}</td>
-      <td class="num">${it.value ? R.money(sell) : `<input class="n" data-val="${it.id}" placeholder="gp" inputmode="decimal" aria-label="Price in gp">`}</td><td class="num hide-s mu">${it.value ? R.money(buy) : ''}</td><td><button class="sm" data-rm="${it.id}" aria-label="Remove">✕</button></td></tr>`;
+      <td class="num">${it.donation ? '<span class="mu">donation</span>' : it.value ? R.money(sell) : `<input class="n" data-val="${it.id}" placeholder="gp" inputmode="decimal" aria-label="Price in gp">`}</td><td class="num hide-s mu">${it.value ? R.money(buy) : ''}</td><td><button class="sm" data-rm="${it.id}" aria-label="Remove">✕</button></td></tr>`;
   };
   app.innerHTML = `
   <div class="card"><div class="row"><h2 class="grow">${esc(shopTitle(s))}</h2><button class="sm" id="rollShopName">🎲 Name</button><button class="sm" id="rename">Edit name</button></div>
@@ -469,7 +477,7 @@ function applyToShops(type, change) {
     if (change.kind === 'edit') {
       const x = s.items.find(y => same(y, change.key, change.oldName)); if (!x) continue;
       const it = change.item;
-      Object.assign(x, { key: it.key, name: it.name, value: it.value, coin: it.coin, band: it.band, magic: it.magic, unique: it.unique, unlimited: it.unlimited, desc: it.desc, rule: R.ruleOf(it) });
+      Object.assign(x, { key: it.key, name: it.name, value: it.value, coin: it.coin, band: it.band, magic: it.magic, unique: it.unique, unlimited: it.unlimited, donation: it.donation, desc: it.desc, rule: R.ruleOf(it) });
       if (it.unlimited) x.qty = null; else if (x.qty == null) x.qty = 0;
       n++;
     } else if (change.kind === 'add') {
@@ -487,7 +495,7 @@ function listsView(app) {
   app.innerHTML = `<div class="card"><h2>Shop lists</h2>
     <p class="mu small">Every shop type and every item it can carry. ${mine ? 'These are your own lists, kept privately in your Google Drive. Change an item and it changes in every shop of that type, in every town.' : `These are the SRD's lists for the ${edition()} rules. To change them, make your own copy first.`}</p>
     ${mine ? '' : '<div class="row"><button class="pri" id="mkOwn">Make my own copy to edit</button></div>'}
-    <div class="grid" style="margin-top:10px">${listTypes().map(t => { const items = masterOf(t), np = items.filter(x => !Number(x.value) && !x.unlimited).length; return `<button class="tile" data-type="${esc(t)}"><b>${esc(t)}</b><span class="mu">${items.length} item${items.length === 1 ? '' : 's'}</span>${np ? `<br><span class="tag bad">${np} without a price</span>` : ''}</button>`; }).join('')}</div></div>`;
+    <div class="grid" style="margin-top:10px">${listTypes().map(t => { const items = masterOf(t), np = items.filter(x => !Number(x.value) && !x.unlimited && !x.donation).length; return `<button class="tile" data-type="${esc(t)}"><b>${esc(t)}</b><span class="mu">${items.length} item${items.length === 1 ? '' : 's'}</span>${np ? `<br><span class="tag bad">${np} without a price</span>` : ''}</button>`; }).join('')}</div></div>`;
   app.querySelectorAll('[data-type]').forEach(b => { b.onclick = () => go('list', { type: b.dataset.type, q: '' }); });
   const mk = $('#mkOwn'); if (mk) mk.onclick = () => { ownLists(); toast('Your own copy is ready. Edit away.'); render(); };
 }
@@ -503,7 +511,7 @@ function listView(app) {
     <input id="fq" placeholder="Search ${esc(type)}" value="${esc(ui.q || '')}" autocomplete="off"></div>
     <div class="card"><table class="stock"><thead><tr><th>Item</th><th class="num">Price</th>${[1, 2, 3, 4, 5].map(n => `<th class="num hide-s">Q${n}</th>`).join('')}</tr></thead>
     <tbody>${groups.map(g => `<tr class="band"><td colspan="7">${g.b}</td></tr>${g.list.map(({ it, i }) => `<tr data-i="${i}" style="${mine ? 'cursor:pointer' : ''}"><td>${esc(it.name)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.unique ? ' <span class="tag">only one ever</span>' : ''}${it.unlimited ? ' <span class="tag">always</span>' : ''}</td>
-      <td class="num">${Number(it.value) ? `${Number(it.value).toLocaleString()} ${esc(it.coin || 'gp')}` : it.unlimited ? '' : '<span class="tag bad">no price</span>'}</td>${[1, 2, 3, 4, 5].map(n => `<td class="num hide-s mu">${ruleText(it, n)}</td>`).join('')}</tr>`).join('')}`).join('') || `<tr><td class="mu">${q ? 'Nothing matches.' : 'No items yet.'}</td></tr>`}</tbody></table></div>`;
+      <td class="num">${it.donation ? '<span class="tag ok">by donation</span>' : Number(it.value) ? `${Number(it.value).toLocaleString()} ${esc(it.coin || 'gp')}` : it.unlimited ? '' : '<span class="tag bad">no price</span>'}</td>${[1, 2, 3, 4, 5].map(n => `<td class="num hide-s mu">${ruleText(it, n)}</td>`).join('')}</tr>`).join('')}`).join('') || `<tr><td class="mu">${q ? 'Nothing matches.' : 'No items yet.'}</td></tr>`}</tbody></table></div>`;
   const f = $('#fq'); f.oninput = () => { ui.q = f.value; const pos = f.selectionStart; listView(app); const g = $('#fq'); g.focus(); g.setSelectionRange(pos, pos); };
   const mk = $('#mkOwn'); if (mk) mk.onclick = () => { ownLists(); toast('Your own copy is ready. Edit away.'); render(); };
   if (!mine) return;
@@ -523,7 +531,8 @@ function itemDialog(type, idx) {
       <div class="grow"><label>Quality band</label><select id="mb">${R.BANDS.map((b, i) => `<option value="${i}" ${it.band === i ? 'selected' : ''}>${b}</option>`).join('')}</select></div></div>
     <div class="row"><label style="margin:6px 0"><input type="checkbox" id="mm" style="width:auto" ${it.magic ? 'checked' : ''}> Magic item</label>
       <label style="margin:6px 0"><input type="checkbox" id="mu" style="width:auto" ${it.unique ? 'checked' : ''}> Only one ever (gone once sold)</label>
-      <label style="margin:6px 0"><input type="checkbox" id="ml" style="width:auto" ${it.unlimited ? 'checked' : ''}> Always available (a service)</label></div>
+      <label style="margin:6px 0"><input type="checkbox" id="ml" style="width:auto" ${it.unlimited ? 'checked' : ''}> Always available (a service)</label>
+      <label style="margin:6px 0"><input type="checkbox" id="mdn" style="width:auto" ${it.donation ? 'checked' : ''}> By donation (players give what they choose)</label></div>
     <label>Restock each month, by the shop's quality: roll from–to, times ×. Leave a row empty if it isn't stocked at that quality.</label>
     <table class="stock" id="rt"><thead><tr><th>Quality</th><th>From</th><th>To</th><th>×</th></tr></thead><tbody>${[0, 1, 2, 3, 4].map(n => `<tr><td>Q${n + 1}</td><td><input class="n" data-r="${n}" data-k="lo" inputmode="numeric" value="${cell(n, 'lo')}"></td><td><input class="n" data-r="${n}" data-k="hi" inputmode="numeric" value="${cell(n, 'hi')}"></td><td><input class="n" data-r="${n}" data-k="m" inputmode="numeric" value="${cell(n, 'm')}"></td></tr>`).join('')}</tbody></table>
     <div class="row"><button class="sm" id="mdef">Use the usual amounts for this band</button></div>
@@ -543,7 +552,7 @@ function itemDialog(type, idx) {
         rule.d.push([lo, hi]); rule.m.push(mu || 1);
       }
       const oldName = was?.name || '';
-      Object.assign(it, { name, value: Number($('#mv', m).value) || 0, coin: $('#mc', m).value, band: Number($('#mb', m).value), magic: $('#mm', m).checked, unique: $('#mu', m).checked || undefined, unlimited: $('#ml', m).checked || undefined, desc: $('#md', m).value.trim(), rule, qty: rule });
+      Object.assign(it, { name, value: Number($('#mv', m).value) || 0, coin: $('#mc', m).value, band: Number($('#mb', m).value), magic: $('#mm', m).checked, unique: $('#mu', m).checked || undefined, unlimited: $('#ml', m).checked || $('#mdn', m).checked || undefined, donation: $('#mdn', m).checked || undefined, desc: $('#md', m).value.trim(), rule, qty: rule });
       if (was) list[idx] = it; else list.push(it);
       saveLib();
       const n = applyToShops(type, was ? { kind: 'edit', key: it.key, oldName, item: it } : { kind: 'add', item: it });

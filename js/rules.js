@@ -245,6 +245,22 @@ export function sale(shop, itemId, n, playerPurse, who = '') {
   const purse = addCoins(addCoins(purseOf(shop), pay.give), pay.change, -1);
   return { shop: { ...shop, items, purse }, cp, give: pay.give, change: pay.change, item: it };
 }
+/** A donation for a temple service (or anything offered "by donation"): the player gives what they choose. */
+export function donate(shop, itemId, cp, playerPurse) {
+  const it = shop.items.find(x => x.id === itemId);
+  if (!it || !it.donation) return { error: "That isn't offered here any more." };
+  cp = Math.round(Number(cp) || 0);
+  if (cp < 1) return { error: 'Give at least 1 cp.' };
+  let pay = settle(playerPurse, purseOf(shop), cp);
+  // no change in the offering box: round the gift up to the coins the player has (sp, then gp, then pp)
+  if (pay.error && purseCp(playerPurse) >= cp) for (const step of [10, 100, 1000]) {
+    const up = Math.ceil(cp / step) * step, give = payFrom(playerPurse, up);
+    if (give) { pay = { give, change: {} }; cp = up; break; }
+  }
+  if (pay.error) return pay;
+  const purse = addCoins(addCoins(purseOf(shop), pay.give), pay.change || {}, -1);
+  return { shop: { ...shop, purse }, cp, give: pay.give, change: pay.change || {}, item: it };
+}
 /** A player sells n of an item the shop stocks: stock up, and the shop pays from what it has (biggest coins first). */
 export function purchase(shop, name, n = 1, who = '') {
   const it = shop.items.find(x => x.name.toLowerCase() === String(name).toLowerCase());
