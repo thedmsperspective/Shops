@@ -113,7 +113,9 @@ async function sync(interactive) {
     pill('syncing…');
     const t = await getToken(interactive);
     const [rem, lib] = await Promise.all([core.readAppdata(t, FILE), core.readAppdata(t, LIB_FILE).catch(() => null)]);
-    if (lib?.app === 'dmp-shops-library' && lib.shops) { LIB = lib; await idbPut('library', lib); }
+    // the newer copy of your lists wins (edited here, or on another device)
+    if (lib?.app === 'dmp-shops-library' && lib.shops && (!LIB || (lib.stamp || 0) >= (LIB.stamp || 0))) { LIB = lib; await idbPut('library', lib); }
+    else if (LIB && (!lib || (LIB.stamp || 0) > (lib.stamp || 0))) await core.writeAppdata(t, LIB_FILE, LIB);
     if (rem?.app === 'dmp-shops' && (rem.state?.stamp || 0) > (S.stamp || 0)) { S = normalize(rem.state); await idbPut('state', S); render(); }
     else if (!rem || (S.stamp || 0) > (rem.state?.stamp || 0)) await core.writeAppdata(t, FILE, { app: 'dmp-shops', v: 1, state: S });
     pill(`✓ saved ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`);
@@ -151,24 +153,27 @@ let playerStarted = false;
 function render() {
   const app = $('#app');
   $('#back').hidden = ui.view === 'home';
-  $('#crumb').textContent = ui.view === 'shop' ? `${loc()?.name || ''}` : '';
+  $('#crumb').textContent = ui.view === 'shop' ? `${loc()?.name || ''}` : ui.view === 'list' ? 'Shop lists' : '';
   if (isPlayer()) { if (!playerStarted) { playerStarted = true; $('#settingsBtn').hidden = true; startPlayer(core, { toast }); } return; }
   if (ui.view === 'location' && loc()) return locationView(app);
   if (ui.view === 'shop' && shopOf()) return shopView(app);
   if (ui.view === 'settings') return settingsView(app);
+  if (ui.view === 'lists') return listsView(app);
+  if (ui.view === 'list' && ui.type) return listView(app);
   ui.view = 'home'; homeView(app);
 }
 
 function homeView(app) {
   const ls = S.locations;
   app.innerHTML = `
-  <div class="card"><div class="row"><h2 class="grow">Towns</h2><button class="pri" id="newLoc">+ New town</button></div>
+  <div class="card"><div class="row"><h2 class="grow">Towns</h2><button id="lists">📋 Shop lists</button><button class="pri" id="newLoc">+ New town</button></div>
     <p class="mu small">Each town keeps its own shops. Lists: ${usingMine() ? 'your own shop lists' : `the SRD's (${edition()} rules)`}.</p>
     <div class="grid">${ls.map(l => `<button class="tile" data-loc="${l.id}"><b>${esc(l.name)}</b><span class="mu">${esc(l.size)} · ${l.shops.filter(s => s.status !== 'closed').length} shops</span><br>${l.open ? '<span class="tag ok">Open to players</span>' : '<span class="tag">Closed to players</span>'}${l.partyHere ? '<span class="tag ac">Party is here</span>' : ''}</button>`).join('') || '<p class="mu">No towns yet.</p>'}</div></div>
   ${ls.length ? `<div class="card"><h3>A new month</h3><p class="mu small">Every shop in every town rolls its month: new quality and stock, what it sold and bought, and its stall or building countdown. You'll see a summary, and you can undo it.</p>
     <div class="row"><button class="pri" id="month">Start a new month</button>${S.undo ? `<button id="undo">Undo the last new month</button>` : ''}</div></div>` : ''}`;
   app.querySelectorAll('[data-loc]').forEach(b => { b.onclick = () => go('location', { loc: b.dataset.loc }); });
   $('#newLoc').onclick = newTownDialog;
+  $('#lists').onclick = () => go('lists');
   const m = $('#month'); if (m) m.onclick = () => newMonth();
   const u = $('#undo'); if (u) u.onclick = undoMonth;
 }
@@ -315,6 +320,128 @@ function addItemDialog(s) {
   });
 }
 
+/* ---------- the master lists: every shop type and every item it can carry ---------- */
+// What new shops are stocked from, and what every shop of a type follows: change an item here and it changes in every
+// shop of that type in every town (shelf counts stay). Items added here reach shelves at the next new month.
+const COIN_LIST = ['cp', 'sp', 'gp', 'pp'];
+const BAND_D = [[[1, 3], [1, 3], [1, 4], [2, 5], [2, 5]], [0, [1, 3], [1, 4], [2, 5], [2, 5]], [0, 0, [1, 4], [2, 5], [2, 5]], [0, 0, 0, [2, 5], [2, 5]], [0, 0, 0, 0, [2, 5]]];
+const defaultRule = (band, magic) => ({ d: JSON.parse(JSON.stringify(BAND_D[band] || BAND_D[0])), m: magic ? [1, 1, 1, 1, 1] : [3, 5, 8, 10, 15] });
+const listTypes = () => { const own = usingMine() ? Object.keys(LIB.shops || {}) : []; return [...R.SHOPS, ...own.filter(t => !R.SHOPS.includes(t))]; };
+const masterOf = type => (usingMine() ? (LIB.shops[type]?.items || []) : (SRD_SHOPS[edition()]?.[type] || []));
+let libT = null;
+function saveLib() {
+  LIB.stamp = Date.now();
+  idbPut('library', LIB);
+  clearTimeout(libT);
+  libT = setTimeout(async () => { try { const t = await getToken(false); if (t) await core.writeAppdata(t, LIB_FILE, LIB); } catch { /* saved on this device; it goes up with the next sync */ } }, 1500);
+}
+// Your own copy to edit: from your lists if you have them, otherwise from the SRD's for this table's edition
+function ownLists() {
+  if (!LIB) LIB = { app: 'dmp-shops-library', v: 1, shops: Object.fromEntries(Object.entries(SRD_SHOPS[edition()] || {}).map(([t, items]) => [t, { items: JSON.parse(JSON.stringify(items)) }])) };
+  S.settings.useMine = true;
+  for (const t of Object.keys(LIB.shops)) for (const it of LIB.shops[t].items || []) if (!it.key) it.key = uid();
+  saveLib(); save();
+}
+// Carry a change into every shop of that type (matched by the item's key, or by name for shops made before keys)
+function applyToShops(type, change) {
+  let n = 0;
+  const same = (x, key, name) => (key && x.key === key) || String(x.name).toLowerCase() === String(name).toLowerCase();
+  for (const l of S.locations) for (const s of l.shops) {
+    if (s.type !== type) continue;
+    if (change.kind === 'edit') {
+      const x = s.items.find(y => same(y, change.key, change.oldName)); if (!x) continue;
+      const it = change.item;
+      Object.assign(x, { key: it.key, name: it.name, value: it.value, coin: it.coin, band: it.band, magic: it.magic, unique: it.unique, unlimited: it.unlimited, desc: it.desc, rule: R.ruleOf(it) });
+      if (it.unlimited) x.qty = null; else if (x.qty == null) x.qty = 0;
+      n++;
+    } else if (change.kind === 'add') {
+      if (s.items.some(y => same(y, change.item.key, change.item.name))) continue;
+      s.items.push({ ...change.item, rule: R.ruleOf(change.item), id: uid(), qty: change.item.unlimited ? null : 0 }); n++;
+    } else if (change.kind === 'remove') {
+      const before = s.items.length; s.items = s.items.filter(y => !same(y, change.key, change.name)); n += before - s.items.length;
+    }
+  }
+  if (n) save();
+  return n;
+}
+function listsView(app) {
+  const mine = usingMine();
+  app.innerHTML = `<div class="card"><h2>Shop lists</h2>
+    <p class="mu small">Every shop type and every item it can carry. ${mine ? 'These are your own lists, kept privately in your Google Drive. Change an item and it changes in every shop of that type, in every town.' : `These are the SRD's lists for the ${edition()} rules. To change them, make your own copy first.`}</p>
+    ${mine ? '' : '<div class="row"><button class="pri" id="mkOwn">Make my own copy to edit</button></div>'}
+    <div class="grid" style="margin-top:10px">${listTypes().map(t => { const items = masterOf(t), np = items.filter(x => !Number(x.value) && !x.unlimited).length; return `<button class="tile" data-type="${esc(t)}"><b>${esc(t)}</b><span class="mu">${items.length} item${items.length === 1 ? '' : 's'}</span>${np ? `<br><span class="tag bad">${np} without a price</span>` : ''}</button>`; }).join('')}</div></div>`;
+  app.querySelectorAll('[data-type]').forEach(b => { b.onclick = () => go('list', { type: b.dataset.type, q: '' }); });
+  const mk = $('#mkOwn'); if (mk) mk.onclick = () => { ownLists(); toast('Your own copy is ready. Edit away.'); render(); };
+}
+const ruleText = (it, q) => { const r = R.ruleOf(it); if (it.unlimited) return '∞'; const dv = r?.d?.[q - 1], m = r?.m?.[q - 1]; if (!dv || !m) return '—'; return Array.isArray(dv) ? `${dv[0]}–${dv[1]}${m > 1 ? ` ×${m}` : ''}` : `${dv}${m > 1 ? ` ×${m}` : ''}`; };
+function listView(app) {
+  const type = ui.type, mine = usingMine(), items = masterOf(type);
+  if (mine && items.some(x => !x.key)) { items.forEach(x => { if (!x.key) x.key = uid(); }); saveLib(); }
+  const q = (ui.q || '').toLowerCase();
+  const shown = items.map((it, i) => ({ it, i })).filter(x => !q || x.it.name.toLowerCase().includes(q));
+  const groups = [...R.BANDS.map((b, i) => ({ b: `${b} Quality`, list: shown.filter(x => x.it.band === i) })), { b: 'Other', list: shown.filter(x => !(x.it.band >= 0 && x.it.band <= 4)) }].filter(g => g.list.length);
+  app.innerHTML = `<div class="card"><div class="row"><h2 class="grow">${esc(type)}</h2>${mine ? '<button class="pri" id="addM">+ Add an item</button>' : '<button class="pri" id="mkOwn">Make my own copy to edit</button>'}</div>
+    <p class="mu small">${items.length} items. Restock shows how many come in each month at Quality 1 to 5 (a roll, times the number after ×). ${mine ? 'Tap an item to change it.' : ''}</p>
+    <input id="fq" placeholder="Search ${esc(type)}" value="${esc(ui.q || '')}" autocomplete="off"></div>
+    <div class="card"><table class="stock"><thead><tr><th>Item</th><th class="num">Price</th>${[1, 2, 3, 4, 5].map(n => `<th class="num hide-s">Q${n}</th>`).join('')}</tr></thead>
+    <tbody>${groups.map(g => `<tr class="band"><td colspan="7">${g.b}</td></tr>${g.list.map(({ it, i }) => `<tr data-i="${i}" style="${mine ? 'cursor:pointer' : ''}"><td>${esc(it.name)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.unique ? ' <span class="tag">only one ever</span>' : ''}${it.unlimited ? ' <span class="tag">always</span>' : ''}</td>
+      <td class="num">${Number(it.value) ? `${Number(it.value).toLocaleString()} ${esc(it.coin || 'gp')}` : it.unlimited ? '' : '<span class="tag bad">no price</span>'}</td>${[1, 2, 3, 4, 5].map(n => `<td class="num hide-s mu">${ruleText(it, n)}</td>`).join('')}</tr>`).join('')}`).join('') || `<tr><td class="mu">${q ? 'Nothing matches.' : 'No items yet.'}</td></tr>`}</tbody></table></div>`;
+  const f = $('#fq'); f.oninput = () => { ui.q = f.value; const pos = f.selectionStart; listView(app); const g = $('#fq'); g.focus(); g.setSelectionRange(pos, pos); };
+  const mk = $('#mkOwn'); if (mk) mk.onclick = () => { ownLists(); toast('Your own copy is ready. Edit away.'); render(); };
+  if (!mine) return;
+  const a = $('#addM'); if (a) a.onclick = () => itemDialog(type, -1);
+  app.querySelectorAll('[data-i]').forEach(r => { r.onclick = () => itemDialog(type, Number(r.dataset.i)); });
+}
+function itemDialog(type, idx) {
+  if (!LIB.shops[type]) LIB.shops[type] = { items: [] };
+  const list = LIB.shops[type].items, was = idx >= 0 ? list[idx] : null;
+  const it = was ? JSON.parse(JSON.stringify(was)) : { key: uid(), name: '', value: 0, coin: 'gp', band: 2, magic: false, unit: 'each', src: 'Homebrew', desc: '' };
+  const r0 = R.ruleOf(it) || defaultRule(it.band, it.magic);
+  const cell = (n, k) => { const dv = r0.d?.[n]; return k === 'lo' ? (Array.isArray(dv) ? dv[0] : dv || '') : k === 'hi' ? (Array.isArray(dv) ? dv[1] : dv || '') : (r0.m?.[n] || ''); };
+  modal(`<h2>${was ? 'Change an item' : `Add an item to ${esc(type)}`}</h2>
+    <label>Name</label><input id="mn" value="${esc(it.name)}">
+    <div class="row"><div class="grow"><label>Price</label><input id="mv" inputmode="decimal" value="${Number(it.value) || ''}" placeholder="0"></div>
+      <div><label>Coin</label><select id="mc">${COIN_LIST.map(c => `<option ${(it.coin || 'gp') === c ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
+      <div class="grow"><label>Quality band</label><select id="mb">${R.BANDS.map((b, i) => `<option value="${i}" ${it.band === i ? 'selected' : ''}>${b}</option>`).join('')}</select></div></div>
+    <div class="row"><label style="margin:6px 0"><input type="checkbox" id="mm" style="width:auto" ${it.magic ? 'checked' : ''}> Magic item</label>
+      <label style="margin:6px 0"><input type="checkbox" id="mu" style="width:auto" ${it.unique ? 'checked' : ''}> Only one ever (gone once sold)</label>
+      <label style="margin:6px 0"><input type="checkbox" id="ml" style="width:auto" ${it.unlimited ? 'checked' : ''}> Always available (a service)</label></div>
+    <label>Restock each month, by the shop's quality: roll from–to, times ×. Leave a row empty if it isn't stocked at that quality.</label>
+    <table class="stock" id="rt"><thead><tr><th>Quality</th><th>From</th><th>To</th><th>×</th></tr></thead><tbody>${[0, 1, 2, 3, 4].map(n => `<tr><td>Q${n + 1}</td><td><input class="n" data-r="${n}" data-k="lo" inputmode="numeric" value="${cell(n, 'lo')}"></td><td><input class="n" data-r="${n}" data-k="hi" inputmode="numeric" value="${cell(n, 'hi')}"></td><td><input class="n" data-r="${n}" data-k="m" inputmode="numeric" value="${cell(n, 'm')}"></td></tr>`).join('')}</tbody></table>
+    <div class="row"><button class="sm" id="mdef">Use the usual amounts for this band</button></div>
+    <label>Description (optional)</label><textarea id="md">${esc(it.desc || '')}</textarea>
+    <div class="row" style="margin-top:12px"><button class="pri" id="ms">${was ? 'Save' : 'Add'}</button><button id="mx">Cancel</button><span class="grow"></span>${was ? '<button class="bad" id="mdel">Remove from the list</button>' : ''}</div>`, m => {
+    $('#mx', m).onclick = closeModal;
+    $('#mdef', m).onclick = () => { const r = defaultRule(Number($('#mb', m).value), $('#mm', m).checked); m.querySelectorAll('[data-r]').forEach(i => { const n = Number(i.dataset.r), dv = r.d[n]; i.value = i.dataset.k === 'm' ? (dv ? r.m[n] : '') : (Array.isArray(dv) ? dv[i.dataset.k === 'lo' ? 0 : 1] : ''); }); };
+    $('#ms', m).onclick = () => {
+      const name = $('#mn', m).value.trim(); if (!name) return toast('Give the item a name.');
+      if (list.some((x, i) => i !== idx && x.name.toLowerCase() === name.toLowerCase())) return toast(`${type} already has an item called ${name}.`);
+      const rule = { d: [], m: [] };
+      for (let n = 0; n < 5; n++) {
+        const v = k => parseInt($(`[data-r="${n}"][data-k="${k}"]`, m).value, 10);
+        let lo = v('lo'), hi = v('hi'); const mu = v('m');
+        if (!lo && !hi) { rule.d.push(0); rule.m.push(0); continue; }
+        lo = lo || hi; hi = hi || lo; if (hi < lo) [lo, hi] = [hi, lo];
+        rule.d.push([lo, hi]); rule.m.push(mu || 1);
+      }
+      const oldName = was?.name || '';
+      Object.assign(it, { name, value: Number($('#mv', m).value) || 0, coin: $('#mc', m).value, band: Number($('#mb', m).value), magic: $('#mm', m).checked, unique: $('#mu', m).checked || undefined, unlimited: $('#ml', m).checked || undefined, desc: $('#md', m).value.trim(), rule, qty: rule });
+      if (was) list[idx] = it; else list.push(it);
+      saveLib();
+      const n = applyToShops(type, was ? { kind: 'edit', key: it.key, oldName, item: it } : { kind: 'add', item: it });
+      closeModal(); render();
+      toast(was ? `Saved.${n ? ` Updated in ${n} shop${n === 1 ? '' : 's'}.` : ''}` : `Added.${n ? ` It reaches ${n} shop${n === 1 ? '' : 's'} with the next new month.` : ''}`);
+    };
+    const del = $('#mdel', m);
+    if (del) del.onclick = () => {
+      if (!confirm(`Remove ${was.name} from the ${type} list? It also comes off the shelves of every ${type} in your towns.`)) return;
+      list.splice(idx, 1); saveLib();
+      const n = applyToShops(type, { kind: 'remove', key: was.key, name: was.name });
+      closeModal(); render(); toast(`Removed.${n ? ` Taken off ${n} shop${n === 1 ? '' : 's'}.` : ''}`);
+    };
+  });
+}
+
 /* ---------- a new month for every town ---------- */
 function newMonth() {
   if (!confirm('Start a new month in every town? Each shop rolls its quality and stock.')) return;
@@ -385,7 +512,7 @@ function settingsView(app) {
 }
 
 /* ---------- start ---------- */
-$('#back').onclick = () => go(ui.view === 'shop' ? 'location' : 'home');
+$('#back').onclick = () => go(ui.view === 'shop' ? 'location' : ui.view === 'list' ? 'lists' : 'home');
 $('#settingsBtn').onclick = () => go('settings');
 window.addEventListener('dmp-suite', () => render());
 (async () => {
