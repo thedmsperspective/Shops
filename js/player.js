@@ -116,7 +116,7 @@ async function ask(req) {
 async function buy(shop, it) {
   const c = me(); if (!c || !it) return;
   if (R.purseCp(purseOfChar(c)) < priceOf(it, shop, c)) { toast("You don't have enough coin for that."); return; }
-  const r = await ask({ kind: 'buy', shopId: shop.id, itemId: it.id, n: 1, purse: purseOfChar(c), who: c.name || '' });
+  const r = await ask({ kind: 'buy', shopId: shop.id, itemId: it.id, n: 1, purse: purseOfChar(c), who: c.name || '', charId: c.id });
   if (r.error) { toast(r.error); draw(); return; }
   await changeSheet(c.id, x => {
     x.coins = { ...(x.coins || {}), ...R.addCoins(R.addCoins(purseOfChar(x), r.give, -1), r.change) };
@@ -124,10 +124,11 @@ async function buy(shop, it) {
     const list = (x.inv[cat] = x.inv[cat] || []);
     const row = list.find(y => String(y.name).toLowerCase() === it.n.toLowerCase());
     if (row) row.qty = n(row.qty || 1) + 1;
-    else list.push({ id: P.model.uid(), name: it.n, wt: '', qty: 1, magic: !!it.magic, desc: it.d || '' });
+    // a magic item: a placeholder until the Magic Items app gives the real card (then this row goes away)
+    else list.push({ id: P.model.uid(), name: it.n, wt: '', qty: 1, ...(it.magic ? { magic: true, fromShop: true } : {}), desc: it.magic ? 'Bought in a shop. Its card arrives from your DM\'s Magic Items app.' : (it.d || '') });
     return ['coins', `inv.${cat}`];
   });
-  toast(`Bought ${it.n} for ${R.money(r.cp)}.${R.purseCp(r.change) ? ` Change: ${R.purseText(r.change)}.` : ''}`);
+  toast(`Bought ${it.n} for ${R.money(r.cp)}.${R.purseCp(r.change) ? ` Change: ${R.purseText(r.change)}.` : ''}${it.magic ? ' Its card arrives on your sheet once your DM opens the Magic Items app.' : ''}`);
 }
 // By donation: the player gives what they choose, from the coins on their sheet
 async function donate(shop, it) {
@@ -165,8 +166,19 @@ async function sell(shop, x) {
   asked.delete(askKey(c, x.name)); keepAsked();
   toast(`Sold ${x.name} for ${R.purseText(r.paid)}.`);
 }
-const catFor = (type, it) => (type === 'Blacksmith' && /armor|mail|plate|shield|breastplate|leather|hide/i.test(it.n) ? 'armor'
-  : type === 'Blacksmith' || type === 'Fletcher' ? 'weapons' : type === 'Jewelry' ? 'treasure' : /tools|kit|supplies/i.test(it.n) ? 'tools' : 'general');
+// Which inventory section a bought item goes in: the DM's own choice for the item, else a guess from the shop and the name
+const catFor = (type, it) => {
+  if (it.inv) return it.inv;
+  if (it.magic) return 'general';
+  const n = it.n || '';
+  if (/component|spellcasting focus|arcane focus|druidic focus|holy symbol|reliquary|emblem|amulet of/i.test(n)) return 'components';
+  if (/armor|mail|plate|shield|breastplate|leather|hide|padded|brigandine/i.test(n) && type !== 'Fashion') return 'armor';
+  if (type === 'Fashion' || /cloak|robe|boots|gloves|hat|clothes|outfit|gown|vestments|coat|cape/i.test(n)) return 'armor';
+  if (type === 'Blacksmith' || type === 'Fletcher' || /sword|axe|bow|dagger|mace|spear|arrow|bolt|crossbow|hammer|club|staff|whip|javelin|trident|lance|pike|halberd|scimitar|rapier|sling/i.test(n)) return 'weapons';
+  if (type === 'Jewelry' || /gem|ring|necklace|earring|bracelet|pearl|jewel|figurine|idol|statuette/i.test(n)) return 'treasure';
+  if (type === 'Instruments' || /tools|kit|supplies|instrument/i.test(n)) return 'tools';
+  return 'general';
+};
 
 // Change the character here, stamp what changed, and send it over the live link so the DM's copy follows at once
 async function changeSheet(id, fn) {

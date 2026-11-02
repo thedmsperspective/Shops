@@ -47,7 +47,7 @@ function playerView() {
       won: s.haggleWon === true ? ['*'] : (s.haggleBy || []),
       keeper: { name: s.keeper?.name || '', race: s.keeper?.race || '', gender: s.keeper?.gender || '' },
       // only what's on the shelf, at the price the party pays (haggled only once they've won it)
-      items: s.items.filter(i => i.qty == null || i.qty > 0).filter(i => i.value || i.donation).map(i => ({ id: i.id, n: i.name, q: i.qty ?? null, p: i.donation ? 0 : R.sellPrice(s, i), hp: i.donation ? 0 : R.sellPrice(s, i, true), ...(i.donation ? { don: true } : {}), band: i.band, magic: !!i.magic, d: String(i.desc || '').slice(0, 240) })),
+      items: s.items.filter(i => i.qty == null || i.qty > 0).filter(i => i.value || i.donation).map(i => ({ id: i.id, n: i.name, q: i.qty ?? null, p: i.donation ? 0 : R.sellPrice(s, i), hp: i.donation ? 0 : R.sellPrice(s, i, true), ...(i.donation ? { don: true } : {}), ...(i.inv ? { inv: i.inv } : {}), band: i.band, magic: !!i.magic, d: String(i.desc || '').slice(0, 240) })),
       buys: s.items.filter(i => i.value).map(i => ({ n: i.name, p: R.buyPrice(s, i), hp: R.buyPrice(s, i, true) })),
       ...(s.type === R.GENERAL ? { buysAll: true, offers: (s.offers || []).map(o => ({ id: o.id, n: o.name, p: o.cp, who: o.who || '', no: !!o.refused })) } : {}),
     })),
@@ -73,8 +73,9 @@ async function listenToPlayers() {
       if (r.error) ans = { error: r.error };
       else {
         l.shops[i] = { ...r.shop, log: [...(r.shop.log || []), `${req.who || 'A player'} bought ${r.item.name} for ${R.money(r.cp)}`].slice(-40) };
-        ans = { ok: true, cp: r.cp, give: r.give, change: r.change };
+        ans = { ok: true, cp: r.cp, give: r.give, change: r.change, ...(r.item.magic ? { magic: true } : {}) };
         toast(`${req.who || 'A player'} bought ${r.item.name} at ${shopTitle(l.shops[i])}.`);
+        if (r.item.magic) handToMagicItems({ item: r.item.name, charId: req.charId || '', who: req.who || '', shop: shopTitle(l.shops[i]), town: l.name });
       }
     } else if (req.kind === 'quote') {
       // the General Store's offer for something it doesn't stock: from your lists, or you name a price
@@ -124,6 +125,24 @@ async function listenToPlayers() {
   });
 }
 
+// A magic item bought in a shop: a note in your Drive for the Magic Items app, which gives the character a copy
+// (with its card, charges and attunement) the next time it opens. Nothing is lost if this device is offline: it waits.
+async function handToMagicItems(x) {
+  const note = { id: uid(), ...x, at: Date.now() };
+  S.miOut = [...(S.miOut || []), note]; await save();
+  flushMagicItems();
+}
+async function flushMagicItems() {
+  if (!(S.miOut || []).length) return;
+  try {
+    const t = await getToken(false);
+    const cur = (await core.readAppdata(t, 'dmp-mi-inbox.json').catch(() => null)) || { app: 'dmp-mi-inbox', items: [] };
+    const have = new Set((cur.items || []).map(n => n.id));
+    cur.items = [...(cur.items || []), ...S.miOut.filter(n => !have.has(n.id))];
+    await core.writeAppdata(t, 'dmp-mi-inbox.json', cur);
+    S.miOut = []; await save();
+  } catch (e) { console.warn('magic items note', e); }
+}
 // What the General Store pays for something it doesn't stock: half its price in your lists (or the SRD's), in copper
 function priceGuess(shop, name, who = '') {
   const want = String(name || '').trim().toLowerCase(); if (!want) return 0;
@@ -450,6 +469,7 @@ function bindHaggle(app, s) {
 // What new shops are stocked from, and what every shop of a type follows: change an item here and it changes in every
 // shop of that type in every town (shelf counts stay). Items added here reach shelves at the next new month.
 const COIN_LIST = ['cp', 'sp', 'gp', 'pp'];
+const INV_SECTIONS = [['', 'Let Shops decide (by the shop and the item)'], ['armor', 'Armor & Clothing'], ['weapons', 'Weapons'], ['tools', 'Tools & Kits'], ['treasure', 'Treasure & Trinkets'], ['components', 'Spell Components'], ['general', 'General Items']];
 const BAND_D = [[[1, 3], [1, 3], [1, 4], [2, 5], [2, 5]], [0, [1, 3], [1, 4], [2, 5], [2, 5]], [0, 0, [1, 4], [2, 5], [2, 5]], [0, 0, 0, [2, 5], [2, 5]], [0, 0, 0, 0, [2, 5]]];
 const defaultRule = (band, magic) => ({ d: JSON.parse(JSON.stringify(BAND_D[band] || BAND_D[0])), m: magic ? [1, 1, 1, 1, 1] : [3, 5, 8, 10, 15] });
 const listTypes = () => { const own = usingMine() ? Object.keys(LIB.shops || {}) : []; return [...R.SHOPS, ...own.filter(t => !R.SHOPS.includes(t))]; };
@@ -477,7 +497,7 @@ function applyToShops(type, change) {
     if (change.kind === 'edit') {
       const x = s.items.find(y => same(y, change.key, change.oldName)); if (!x) continue;
       const it = change.item;
-      Object.assign(x, { key: it.key, name: it.name, value: it.value, coin: it.coin, band: it.band, magic: it.magic, unique: it.unique, unlimited: it.unlimited, donation: it.donation, desc: it.desc, rule: R.ruleOf(it) });
+      Object.assign(x, { key: it.key, name: it.name, value: it.value, coin: it.coin, band: it.band, magic: it.magic, unique: it.unique, unlimited: it.unlimited, donation: it.donation, inv: it.inv, desc: it.desc, rule: R.ruleOf(it) });
       if (it.unlimited) x.qty = null; else if (x.qty == null) x.qty = 0;
       n++;
     } else if (change.kind === 'add') {
@@ -533,6 +553,7 @@ function itemDialog(type, idx) {
       <label style="margin:6px 0"><input type="checkbox" id="mu" style="width:auto" ${it.unique ? 'checked' : ''}> Only one ever (gone once sold)</label>
       <label style="margin:6px 0"><input type="checkbox" id="ml" style="width:auto" ${it.unlimited ? 'checked' : ''}> Always available (a service)</label>
       <label style="margin:6px 0"><input type="checkbox" id="mdn" style="width:auto" ${it.donation ? 'checked' : ''}> By donation (players give what they choose)</label></div>
+    <label>Goes in (the section of a character's inventory it lands in when bought)</label><select id="minv">${INV_SECTIONS.map(([k, n]) => `<option value="${k}" ${(it.inv || '') === k ? 'selected' : ''}>${n}</option>`).join('')}</select>
     <label>Restock each month, by the shop's quality: roll from–to, times ×. Leave a row empty if it isn't stocked at that quality.</label>
     <table class="stock" id="rt"><thead><tr><th>Quality</th><th>From</th><th>To</th><th>×</th></tr></thead><tbody>${[0, 1, 2, 3, 4].map(n => `<tr><td>Q${n + 1}</td><td><input class="n" data-r="${n}" data-k="lo" inputmode="numeric" value="${cell(n, 'lo')}"></td><td><input class="n" data-r="${n}" data-k="hi" inputmode="numeric" value="${cell(n, 'hi')}"></td><td><input class="n" data-r="${n}" data-k="m" inputmode="numeric" value="${cell(n, 'm')}"></td></tr>`).join('')}</tbody></table>
     <div class="row"><button class="sm" id="mdef">Use the usual amounts for this band</button></div>
@@ -552,7 +573,7 @@ function itemDialog(type, idx) {
         rule.d.push([lo, hi]); rule.m.push(mu || 1);
       }
       const oldName = was?.name || '';
-      Object.assign(it, { name, value: Number($('#mv', m).value) || 0, coin: $('#mc', m).value, band: Number($('#mb', m).value), magic: $('#mm', m).checked, unique: $('#mu', m).checked || undefined, unlimited: $('#ml', m).checked || $('#mdn', m).checked || undefined, donation: $('#mdn', m).checked || undefined, desc: $('#md', m).value.trim(), rule, qty: rule });
+      Object.assign(it, { name, value: Number($('#mv', m).value) || 0, coin: $('#mc', m).value, band: Number($('#mb', m).value), magic: $('#mm', m).checked, unique: $('#mu', m).checked || undefined, unlimited: $('#ml', m).checked || $('#mdn', m).checked || undefined, donation: $('#mdn', m).checked || undefined, inv: $('#minv', m).value || undefined, desc: $('#md', m).value.trim(), rule, qty: rule });
       if (was) list[idx] = it; else list.push(it);
       saveLib();
       const n = applyToShops(type, was ? { kind: 'edit', key: it.key, oldName, item: it } : { kind: 'add', item: it });
@@ -661,5 +682,6 @@ window.addEventListener('dmp-suite', () => render());
   render();
   if (!isPlayer() && (core?.signedIn?.(core.SCOPES.appdata, { app: 'shops' }) || core?.staysSignedIn?.())) sync(false);
   if (amDm()) { publish(); listenToPlayers(); }
+  flushMagicItems();
 })();
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
