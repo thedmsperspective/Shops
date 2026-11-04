@@ -13,6 +13,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 /* ---------- the suite core (sign-in, table, edition) ---------- */
 let core = null;
 const coreReady = import('/core/suite.js').then(m => { core = m; }).catch(() => {});
+import('/core/text.js').catch(() => {}); // indent buttons and bullet lists in every text box
 const edition = () => (core?.tableSettings?.().edition === '2024' ? '2024' : '2014');
 const isPlayer = () => core?.tableRole?.() === 'player';
 
