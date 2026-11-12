@@ -66,7 +66,7 @@ function draw() {
       <h2>${esc(shop.name)}</h2><p class="mu">${esc(shop.type)} · ${esc(shop.keeper?.name || '')}${shop.keeper?.race ? `, ${esc([shop.keeper.gender, shop.keeper.race].filter(Boolean).join(' '))}` : ''}</p>${haggleLine(shop, c)}${who}
       <div class="row"><button id="tbuy" aria-pressed="${tab === 'buy'}">Buy</button><button id="tsell" aria-pressed="${tab === 'sell'}">Sell</button></div></div>
       ${shop.status === 'closed' ? '<div class="warn">This shop is closed.</div>' : tab === 'buy' ? `<div class="card"><table class="stock"><thead><tr><th>Item</th><th class="num">In stock</th><th class="num">Price</th><th></th></tr></thead><tbody>
-        ${bands.map(g => `<tr class="band"><td colspan="4">${g.b} Quality</td></tr>${g.items.map(it => `<tr><td>${esc(it.n)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.d ? `<br><small class="mu">${esc(it.d)}</small>` : ''}</td><td class="num">${it.q == null ? '∞' : it.q}</td><td class="num">${it.don ? '<span class="mu">By donation</span>' : R.money(priceOf(it, shop, c))}</td><td>${it.don ? `<button class="sm pri" data-don="${it.id}" ${busy || !c ? 'disabled' : ''}>Donate</button>` : `<button class="sm pri" data-buy="${it.id}" ${busy || !c ? 'disabled' : ''}>Buy</button>`}</td></tr>`).join('')}`).join('') || '<tr><td class="mu">Nothing on the shelf right now.</td></tr>'}
+        ${bands.map(g => `<tr class="band"><td colspan="4">${g.b} Quality</td></tr>${g.items.map(it => `<tr><td>${esc(it.n)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.base ? `<br><label class="small mu">Made from <select class="sm" data-base="${it.id}">${it.base.map((b, k) => `<option value="${k}">${esc(b.n)}: ${R.money(priceOf(b, shop, c))}</option>`).join('')}</select></label>` : ''}${it.d ? `<br><small class="mu">${esc(it.d)}</small>` : ''}</td><td class="num">${it.q == null ? '∞' : it.q}</td><td class="num">${it.don ? '<span class="mu">By donation</span>' : `${it.base ? 'from ' : ''}${R.money(priceOf(it, shop, c))}`}</td><td>${it.don ? `<button class="sm pri" data-don="${it.id}" ${busy || !c ? 'disabled' : ''}>Donate</button>` : `<button class="sm pri" data-buy="${it.id}" ${busy || !c ? 'disabled' : ''}>Buy</button>`}</td></tr>`).join('')}`).join('') || '<tr><td class="mu">Nothing on the shelf right now.</td></tr>'}
       </tbody></table></div>` : `<div class="card"><p class="mu small">${shop.buysAll ? `${esc(shop.name)} buys almost anything. For things it doesn't stock, ask for an offer.` : `${esc(shop.name)} only buys the kinds of things it sells.`}</p>
         ${mine.length ? `<table class="stock"><thead><tr><th>Your item</th><th class="num">You have</th><th class="num">They pay</th><th></th></tr></thead><tbody>${mine.map(x => `<tr><td>${esc(x.row.name)}</td><td class="num">${n(x.row.qty) || 1}</td>
           <td class="num">${x.p != null ? R.money(x.p) : x.offer?.no ? '<span class="tag bad">Won\'t buy</span>' : x.waiting ? '<span class="tag">Waiting for an offer</span>' : '<span class="mu">—</span>'}</td>
@@ -113,10 +113,16 @@ async function ask(req) {
     return await T.shopRequest(pass?.value || null, core.currentTable().id, req);
   } finally { busy = false; }
 }
-async function buy(shop, it) {
-  const c = me(); if (!c || !it) return;
+async function buy(shop, it0) {
+  const c = me(); if (!c || !it0) return;
+  // priced on top of a base (Armor of Gleaming): the armor picked in the row, under its full name
+  let it = it0, base = '';
+  if (it0.base) {
+    const b = it0.base[Number(document.querySelector(`[data-base="${it0.id}"]`)?.value) || 0]; if (!b) return;
+    base = b.n; it = { ...it0, n: `${it0.n} (${b.n})`, p: b.p, hp: b.hp };
+  }
   if (R.purseCp(purseOfChar(c)) < priceOf(it, shop, c)) { toast("You don't have enough coin for that."); return; }
-  const r = await ask({ kind: 'buy', shopId: shop.id, itemId: it.id, n: 1, purse: purseOfChar(c), who: c.name || '', charId: c.id });
+  const r = await ask({ kind: 'buy', shopId: shop.id, itemId: it.id, n: 1, purse: purseOfChar(c), who: c.name || '', charId: c.id, ...(base ? { base } : {}) });
   if (r.error) { toast(r.error); draw(); return; }
   await changeSheet(c.id, x => {
     x.coins = { ...(x.coins || {}), ...R.addCoins(R.addCoins(purseOfChar(x), r.give, -1), r.change) };

@@ -117,14 +117,64 @@ export function rollQty(item, q) {
 /* ---------- prices (everything kept in copper) ---------- */
 export const COIN_CP = { cp: 1, sp: 10, ep: 50, gp: 100, pp: 1000 };
 export const valueCp = item => Math.round((Number(item.value) || 0) * (COIN_CP[item.coin] || 100));
-/** What the shop charges: value × the shop's price modifier, less the party's haggle discount this month. */
-export function sellPrice(shop, item, haggled = false) {
-  const base = valueCp(item) * (shop.priceMod || 1);
+/* ---------- items priced on top of a base item (Armor of Gleaming: +75 gp plus the armor) ---------- */
+// The item's own price is what it adds; the player picks the base (the armor or weapon) when they buy, from the
+// ones the shop could stock at its quality. Kinds of base:
+export const ADDON_KINDS = [['', 'No, this is the whole price'], ['armor', 'Any armor'], ['armor-light', 'Light armor'], ['armor-medium', 'Medium armor'],
+  ['armor-heavy', 'Heavy armor'], ['armor-mh', 'Medium or heavy armor'], ['weapon', 'Any weapon'], ['weapon-melee', 'Melee weapon'],
+  ['weapon-ranged', 'Ranged weapon'], ['sword', 'Any sword']];
+export const addOnLabel = k => ({ armor: 'armor', 'armor-light': 'light armor', 'armor-medium': 'medium armor', 'armor-heavy': 'heavy armor', 'armor-mh': 'medium or heavy armor', weapon: 'weapon', 'weapon-melee': 'melee weapon', 'weapon-ranged': 'ranged weapon', sword: 'sword' }[k] || '');
+const ARMOR = { light: ['padded', 'leather', 'studded leather'], medium: ['hide', 'chain shirt', 'scale mail', 'breastplate', 'half plate', 'spiked armor'], heavy: ['ring mail', 'chain mail', 'splint', 'plate'] };
+const WEAPON = {
+  melee: ['club', 'dagger', 'greatclub', 'handaxe', 'javelin', 'light hammer', 'mace', 'quarterstaff', 'sickle', 'spear', 'battleaxe', 'flail', 'glaive', 'greataxe', 'greatsword', 'halberd', 'lance', 'longsword', 'maul', 'morningstar', 'pike', 'rapier', 'scimitar', 'shortsword', 'trident', 'war pick', 'warhammer', 'whip'],
+  ranged: ['light crossbow', 'dart', 'shortbow', 'sling', 'blowgun', 'hand crossbow', 'heavy crossbow', 'longbow', 'net', 'musket', 'pistol'],
+};
+const SWORDS = ['shortsword', 'longsword', 'greatsword', 'scimitar', 'rapier'];
+// "Studded Leather Armor" → "studded leather"; "Crossbow, light" → "light crossbow"
+const plainName = n => { let x = String(n || '').toLowerCase().replace(/\(.*?\)/g, '').trim(); const c = /^(\w[\w ]*?),\s*(\w+)$/.exec(x); if (c) x = `${c[2]} ${c[1]}`; return x.replace(/\s+armor$/, '').replace(/\s+/g, ' ').trim(); };
+/** A base's name as players see it: "Studded Leather Armor" → "Studded Leather" */
+export const baseLabel = n => String(n || '').replace(/\s+armor$/i, '').trim();
+export function fitsBase(kind, name) {
+  const n = plainName(name);
+  const armor = Object.entries(ARMOR).find(([, l]) => l.includes(n))?.[0], weapon = Object.entries(WEAPON).find(([, l]) => l.includes(n))?.[0];
+  switch (kind) {
+    case 'armor': return !!armor;
+    case 'armor-light': return armor === 'light';
+    case 'armor-medium': return armor === 'medium';
+    case 'armor-heavy': return armor === 'heavy';
+    case 'armor-mh': return armor === 'medium' || armor === 'heavy';
+    case 'weapon': return !!weapon;
+    case 'weapon-melee': return weapon === 'melee';
+    case 'weapon-ranged': return weapon === 'ranged';
+    case 'sword': return SWORDS.includes(n);
+    default: return false;
+  }
+}
+/** Could a shop of this quality stock this item? (its restock rule has a roll at that quality) */
+export function canStock(item, q) { if (item.unlimited) return true; const r = ruleOf(item); const dv = r?.d?.[q - 1], m = r?.m?.[q - 1]; return !!dv && !!m; }
+/** The bases a player can choose for an add-on item at this shop: [{ name, label, cp }], cheapest first. Looks in each
+ *  list in turn (the shop's own, then the Blacksmith's) and uses the first that has any. anyQuality: for buying back. */
+export function basesFor(shop, item, lists, anyQuality = false) {
+  if (!item?.addOn) return [];
+  for (const list of lists) {
+    const seen = new Set();
+    const out = (list || []).filter(b => !b.magic && !b.addOn && fitsBase(item.addOn, b.name) && (anyQuality || canStock(b, shop.quality)))
+      .filter(b => { const k = plainName(b.name); if (seen.has(k)) return false; seen.add(k); return true; })
+      .map(b => ({ name: b.name, label: baseLabel(b.name), cp: valueCp(b) })).sort((a, b) => a.cp - b.cp);
+    if (out.length) return out;
+  }
+  return [];
+}
+
+/** What the shop charges: value × the shop's price modifier, less the party's haggle discount this month.
+ *  extraCp: a base item's value, for an item priced on top of one. */
+export function sellPrice(shop, item, haggled = false, extraCp = 0) {
+  const base = (valueCp(item) + (Number(extraCp) || 0)) * (shop.priceMod || 1);
   return Math.max(0, Math.round(haggled ? base * (1 - (shop.haggle?.off || 0) / 100) : base));
 }
 /** What the shop pays for one (half its value), plus the haggle discount if the party won it. */
-export function buyPrice(shop, item, haggled = false) {
-  const base = valueCp(item) / 2;
+export function buyPrice(shop, item, haggled = false, extraCp = 0) {
+  const base = (valueCp(item) + (Number(extraCp) || 0)) / 2;
   return Math.max(0, Math.round(haggled ? base * (1 + (shop.haggle?.off || 0) / 100) : base));
 }
 /** "12 gp 5 sp" from copper */
@@ -234,16 +284,17 @@ export function monthFor(shop, list, { maxQ = 5 } = {}) {
  * A player buys n of an item with the coins in their purse: stock down, the player's coins into the shop's purse and
  * change back out of it. Returns { shop, cp, give, change, item } or { error }.
  */
-export function sale(shop, itemId, n, playerPurse, who = '') {
+export function sale(shop, itemId, n, playerPurse, who = '', base = null) {
   const it = shop.items.find(x => x.id === itemId);
   if (!it) return { error: "That item isn't here any more." };
   if (it.qty != null && it.qty < n) return { error: it.qty ? `They only have ${it.qty}.` : "It's sold out." };
-  const cp = n * sellPrice(shop, it, haggledFor(shop, who));
+  if (it.addOn && !base) return { error: `Choose which ${addOnLabel(it.addOn)} it's made from.` };
+  const cp = n * sellPrice(shop, it, haggledFor(shop, who), base?.cp || 0);
   const pay = settle(playerPurse, purseOf(shop), cp);
   if (pay.error) return pay;
   const items = shop.items.map(x => (x.id === itemId ? { ...x, qty: x.qty == null ? null : x.qty - n, everSold: x.unique ? true : x.everSold } : x));
   const purse = addCoins(addCoins(purseOf(shop), pay.give), pay.change, -1);
-  return { shop: { ...shop, items, purse }, cp, give: pay.give, change: pay.change, item: it };
+  return { shop: { ...shop, items, purse }, cp, give: pay.give, change: pay.change, item: base ? { ...it, name: `${it.name} (${base.label})`, base: base.label } : it };
 }
 /** A donation for a temple service (or anything offered "by donation"): the player gives what they choose. */
 export function donate(shop, itemId, cp, playerPurse) {
@@ -262,10 +313,10 @@ export function donate(shop, itemId, cp, playerPurse) {
   return { shop: { ...shop, purse }, cp, give: pay.give, change: pay.change || {}, item: it };
 }
 /** A player sells n of an item the shop stocks: stock up, and the shop pays from what it has (biggest coins first). */
-export function purchase(shop, name, n = 1, who = '') {
+export function purchase(shop, name, n = 1, who = '', extraCp = 0) {
   const it = shop.items.find(x => x.name.toLowerCase() === String(name).toLowerCase());
   if (!it) return { error: `${shop.name || shop.type} doesn't buy that.` };
-  const cp = n * buyPrice(shop, it, haggledFor(shop, who));
+  const cp = n * buyPrice(shop, it, haggledFor(shop, who), extraCp);
   const paid = payFrom(purseOf(shop), cp);
   if (!paid) return { error: shopCp(shop) < cp ? `${shop.name || shop.type} can't afford it right now.` : `${shop.name || shop.type} doesn't have the right coins to pay that exactly.` };
   const items = shop.items.map(x => (x.id === it.id ? { ...x, qty: x.qty == null ? null : x.qty + n } : x));

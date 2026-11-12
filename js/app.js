@@ -37,6 +37,8 @@ const amDm = () => core?.tableRole?.() === 'dm' && core.currentTable?.()?.id;
 let pubT = null, lastPub = '', stopReq = null;
 function publishSoon() { clearTimeout(pubT); pubT = setTimeout(publish, 600); }
 const tablePass = async () => { let p = core.signedIn(''); if (!p && core.refreshNow) p = await core.refreshNow(); return p?.value || null; };
+// The bases a player can choose for an item priced on top of one (the shop's own list first, then the Blacksmith's)
+const basesOf = (s, it, any = false) => R.basesFor(s, it, [masterOf(s.type), masterOf('Blacksmith')], any);
 function playerView() {
   const l = S.locations.find(x => x.partyHere && x.open);
   if (!l) return { closed: true, t: Date.now() };
@@ -48,8 +50,9 @@ function playerView() {
       won: s.haggleWon === true ? ['*'] : (s.haggleBy || []),
       keeper: { name: s.keeper?.name || '', race: s.keeper?.race || '', gender: s.keeper?.gender || '' },
       // only what's on the shelf, at the price the party pays (haggled only once they've won it)
-      items: s.items.filter(i => i.qty == null || i.qty > 0).filter(i => i.value || i.donation).map(i => ({ id: i.id, n: i.name, q: i.qty ?? null, p: i.donation ? 0 : R.sellPrice(s, i), hp: i.donation ? 0 : R.sellPrice(s, i, true), ...(i.donation ? { don: true } : {}), ...(i.inv ? { inv: i.inv } : {}), band: i.band, magic: !!i.magic, d: String(i.desc || '').slice(0, 240) })),
-      buys: s.items.filter(i => i.value).map(i => ({ n: i.name, p: R.buyPrice(s, i), hp: R.buyPrice(s, i, true) })),
+      items: s.items.filter(i => i.qty == null || i.qty > 0).filter(i => i.value || i.donation).filter(i => !i.addOn || basesOf(s, i).length).map(i => ({ id: i.id, n: i.name, q: i.qty ?? null, p: i.donation ? 0 : R.sellPrice(s, i, false, i.addOn ? basesOf(s, i)[0].cp : 0), hp: i.donation ? 0 : R.sellPrice(s, i, true, i.addOn ? basesOf(s, i)[0].cp : 0),
+        ...(i.addOn ? { of: R.addOnLabel(i.addOn), base: basesOf(s, i).map(b => ({ n: b.label, p: R.sellPrice(s, i, false, b.cp), hp: R.sellPrice(s, i, true, b.cp) })) } : {}), ...(i.donation ? { don: true } : {}), ...(i.inv ? { inv: i.inv } : {}), band: i.band, magic: !!i.magic, d: String(i.desc || '').slice(0, 240) })),
+      buys: s.items.filter(i => i.value).flatMap(i => (i.addOn ? basesOf(s, i, true).map(b => ({ n: `${i.name} (${b.label})`, p: R.buyPrice(s, i, false, b.cp), hp: R.buyPrice(s, i, true, b.cp) })) : [{ n: i.name, p: R.buyPrice(s, i), hp: R.buyPrice(s, i, true) }])),
       ...(s.type === R.GENERAL ? { buysAll: true, offers: (s.offers || []).map(o => ({ id: o.id, n: o.name, p: o.cp, who: o.who || '', no: !!o.refused })) } : {}),
     })),
   };
@@ -70,13 +73,15 @@ async function listenToPlayers() {
     if (!l || i < 0) ans = { error: "That shop isn't open to you right now." };
     else if (l.shops[i].status === 'closed') ans = { error: 'That shop is closed.' };
     else if (req.kind === 'buy') {
-      const r = R.sale(l.shops[i], req.itemId, Math.max(1, Number(req.n) || 1), req.purse || {}, req.who || '');
+      const it0 = l.shops[i].items.find(x => x.id === req.itemId);
+      const base = it0?.addOn ? basesOf(l.shops[i], it0).find(b => b.label === req.base) : null;
+      const r = it0?.addOn && !base ? { error: `${req.base ? `${req.base} isn't available here.` : 'Choose what it\'s made from.'}` } : R.sale(l.shops[i], req.itemId, Math.max(1, Number(req.n) || 1), req.purse || {}, req.who || '', base);
       if (r.error) ans = { error: r.error };
       else {
         l.shops[i] = { ...r.shop, log: [...(r.shop.log || []), `${req.who || 'A player'} bought ${r.item.name} for ${R.money(r.cp)}`].slice(-40) };
         ans = { ok: true, cp: r.cp, give: r.give, change: r.change, ...(r.item.magic ? { magic: true } : {}) };
         toast(`${req.who || 'A player'} bought ${r.item.name} at ${shopTitle(l.shops[i])}.`);
-        if (r.item.magic) handToMagicItems({ item: r.item.name, charId: req.charId || '', who: req.who || '', shop: shopTitle(l.shops[i]), town: l.name });
+        if (r.item.magic) handToMagicItems({ item: r.item.base ? it0.name : r.item.name, ...(r.item.base ? { base: r.item.base } : {}), charId: req.charId || '', who: req.who || '', shop: shopTitle(l.shops[i]), town: l.name });
       }
     } else if (req.kind === 'quote') {
       // the General Store's offer for something it doesn't stock: from your lists, or you name a price
@@ -113,7 +118,15 @@ async function listenToPlayers() {
       l.shops[i] = { ...l.shops[i], offers: (l.shops[i].offers || []).filter(o => o.id !== req.offerId) };
       ans = { ok: true };
     } else if (req.kind === 'sell') {
-      const r = R.purchase(l.shops[i], req.name, Math.max(1, Number(req.n) || 1), req.who || '');
+      // "Armor of Gleaming (Studded Leather)": the add-on item, plus what its base is worth
+      let nm = req.name, extra = 0;
+      const mm = /^(.*) \((.*)\)$/.exec(String(req.name || ''));
+      if (mm && !l.shops[i].items.some(x => x.name.toLowerCase() === String(req.name).toLowerCase())) {
+        const ad = l.shops[i].items.find(x => x.addOn && x.name.toLowerCase() === mm[1].toLowerCase());
+        const b = ad && basesOf(l.shops[i], ad, true).find(x => x.label.toLowerCase() === mm[2].toLowerCase());
+        if (b) { nm = ad.name; extra = b.cp; }
+      }
+      const r = R.purchase(l.shops[i], nm, Math.max(1, Number(req.n) || 1), req.who || '', extra);
       if (r.error) ans = { error: r.error };
       else {
         l.shops[i] = { ...r.shop, log: [...(r.shop.log || []), `${req.who || 'A player'} sold ${r.item.name} for ${R.purseText(r.paid)}`].slice(-40) };
@@ -341,7 +354,7 @@ function shopView(app) {
     const sell = R.sellPrice(s, it), buy = R.buyPrice(s, it), none = it.qty === 0;
     return `<tr class="${none ? 'none' : ''}"><td>${esc(it.name)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.unique ? ' <span class="tag">only one ever</span>' : ''}${it.donation ? ' <span class="tag ok">by donation</span>' : !it.value ? ' <span class="tag bad">no price</span>' : ''}</td>
       <td class="num">${it.qty == null ? '∞' : `<input class="n" data-qty="${it.id}" value="${it.qty}" inputmode="numeric" aria-label="How many">`}</td>
-      <td class="num">${it.donation ? '<span class="mu">donation</span>' : it.value ? R.money(sell) : `<input class="n" data-val="${it.id}" placeholder="gp" inputmode="decimal" aria-label="Price in gp">`}</td><td class="num hide-s mu">${it.value ? R.money(buy) : ''}</td><td><button class="sm" data-rm="${it.id}" aria-label="Remove">✕</button></td></tr>`;
+      <td class="num">${it.donation ? '<span class="mu">donation</span>' : it.value ? `${it.addOn ? '+' : ''}${R.money(sell)}${it.addOn ? `<br><small class="mu">plus the ${esc(R.addOnLabel(it.addOn))}</small>` : ''}` : `<input class="n" data-val="${it.id}" placeholder="gp" inputmode="decimal" aria-label="Price in gp">`}</td><td class="num hide-s mu">${it.value ? R.money(buy) : ''}</td><td><button class="sm" data-rm="${it.id}" aria-label="Remove">✕</button></td></tr>`;
   };
   app.innerHTML = `
   <div class="card"><div class="row"><h2 class="grow">${esc(shopTitle(s))}</h2><button class="sm" id="rollShopName">🎲 Name</button><button class="sm" id="rename">Edit name</button></div>
@@ -498,7 +511,7 @@ function applyToShops(type, change) {
     if (change.kind === 'edit') {
       const x = s.items.find(y => same(y, change.key, change.oldName)); if (!x) continue;
       const it = change.item;
-      Object.assign(x, { key: it.key, name: it.name, value: it.value, coin: it.coin, band: it.band, magic: it.magic, unique: it.unique, unlimited: it.unlimited, donation: it.donation, inv: it.inv, desc: it.desc, rule: R.ruleOf(it) });
+      Object.assign(x, { key: it.key, name: it.name, value: it.value, coin: it.coin, band: it.band, magic: it.magic, unique: it.unique, addOn: it.addOn, unlimited: it.unlimited, donation: it.donation, inv: it.inv, desc: it.desc, rule: R.ruleOf(it) });
       if (it.unlimited) x.qty = null; else if (x.qty == null) x.qty = 0;
       n++;
     } else if (change.kind === 'add') {
@@ -532,7 +545,7 @@ function listView(app) {
     <input id="fq" placeholder="Search ${esc(type)}" value="${esc(ui.q || '')}" autocomplete="off"></div>
     <div class="card"><table class="stock"><thead><tr><th>Item</th><th class="num">Price</th>${[1, 2, 3, 4, 5].map(n => `<th class="num hide-s">Q${n}</th>`).join('')}</tr></thead>
     <tbody>${groups.map(g => `<tr class="band"><td colspan="7">${g.b}</td></tr>${g.list.map(({ it, i }) => `<tr data-i="${i}" style="${mine ? 'cursor:pointer' : ''}"><td>${esc(it.name)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.unique ? ' <span class="tag">only one ever</span>' : ''}${it.unlimited ? ' <span class="tag">always</span>' : ''}</td>
-      <td class="num">${it.donation ? '<span class="tag ok">by donation</span>' : Number(it.value) ? `${Number(it.value).toLocaleString()} ${esc(it.coin || 'gp')}` : it.unlimited ? '' : '<span class="tag bad">no price</span>'}</td>${[1, 2, 3, 4, 5].map(n => `<td class="num hide-s mu">${ruleText(it, n)}</td>`).join('')}</tr>`).join('')}`).join('') || `<tr><td class="mu">${q ? 'Nothing matches.' : 'No items yet.'}</td></tr>`}</tbody></table></div>`;
+      <td class="num">${it.donation ? '<span class="tag ok">by donation</span>' : Number(it.value) ? `${it.addOn ? '+' : ''}${Number(it.value).toLocaleString()} ${esc(it.coin || 'gp')}${it.addOn ? `<br><small class="mu">plus the ${esc(R.addOnLabel(it.addOn))}</small>` : ''}` : it.unlimited ? '' : '<span class="tag bad">no price</span>'}</td>${[1, 2, 3, 4, 5].map(n => `<td class="num hide-s mu">${ruleText(it, n)}</td>`).join('')}</tr>`).join('')}`).join('') || `<tr><td class="mu">${q ? 'Nothing matches.' : 'No items yet.'}</td></tr>`}</tbody></table></div>`;
   const f = $('#fq'); f.oninput = () => { ui.q = f.value; const pos = f.selectionStart; listView(app); const g = $('#fq'); g.focus(); g.setSelectionRange(pos, pos); };
   const mk = $('#mkOwn'); if (mk) mk.onclick = () => { ownLists(); toast('Your own copy is ready. Edit away.'); render(); };
   if (!mine) return;
@@ -554,6 +567,7 @@ function itemDialog(type, idx) {
       <label style="margin:6px 0"><input type="checkbox" id="mu" style="width:auto" ${it.unique ? 'checked' : ''}> Only one ever (gone once sold)</label>
       <label style="margin:6px 0"><input type="checkbox" id="ml" style="width:auto" ${it.unlimited ? 'checked' : ''}> Always available (a service)</label>
       <label style="margin:6px 0"><input type="checkbox" id="mdn" style="width:auto" ${it.donation ? 'checked' : ''}> By donation (players give what they choose)</label></div>
+    <label>Is the price added to a base item? (Armor of Gleaming: +75 gp plus the armor. Players choose the base when they buy, from the ones this shop could stock at its quality.)</label><select id="mao">${R.ADDON_KINDS.map(([k, n]) => `<option value="${k}" ${(it.addOn || '') === k ? 'selected' : ''}>${k ? `Yes: ${n}` : n}</option>`).join('')}</select>
     <label>Goes in (the section of a character's inventory it lands in when bought)</label><select id="minv">${INV_SECTIONS.map(([k, n]) => `<option value="${k}" ${(it.inv || '') === k ? 'selected' : ''}>${n}</option>`).join('')}</select>
     <label>Restock each month, by the shop's quality: roll from–to, times ×. Leave a row empty if it isn't stocked at that quality.</label>
     <table class="stock" id="rt"><thead><tr><th>Quality</th><th>From</th><th>To</th><th>×</th></tr></thead><tbody>${[0, 1, 2, 3, 4].map(n => `<tr><td>Q${n + 1}</td><td><input class="n" data-r="${n}" data-k="lo" inputmode="numeric" value="${cell(n, 'lo')}"></td><td><input class="n" data-r="${n}" data-k="hi" inputmode="numeric" value="${cell(n, 'hi')}"></td><td><input class="n" data-r="${n}" data-k="m" inputmode="numeric" value="${cell(n, 'm')}"></td></tr>`).join('')}</tbody></table>
@@ -574,7 +588,7 @@ function itemDialog(type, idx) {
         rule.d.push([lo, hi]); rule.m.push(mu || 1);
       }
       const oldName = was?.name || '';
-      Object.assign(it, { name, value: Number($('#mv', m).value) || 0, coin: $('#mc', m).value, band: Number($('#mb', m).value), magic: $('#mm', m).checked, unique: $('#mu', m).checked || undefined, unlimited: $('#ml', m).checked || $('#mdn', m).checked || undefined, donation: $('#mdn', m).checked || undefined, inv: $('#minv', m).value || undefined, desc: $('#md', m).value.trim(), rule, qty: rule });
+      Object.assign(it, { name, value: Number($('#mv', m).value) || 0, coin: $('#mc', m).value, band: Number($('#mb', m).value), magic: $('#mm', m).checked, unique: $('#mu', m).checked || undefined, addOn: $('#mao', m).value || undefined, unlimited: $('#ml', m).checked || $('#mdn', m).checked || undefined, donation: $('#mdn', m).checked || undefined, inv: $('#minv', m).value || undefined, desc: $('#md', m).value.trim(), rule, qty: rule });
       if (was) list[idx] = it; else list.push(it);
       saveLib();
       const n = applyToShops(type, was ? { kind: 'edit', key: it.key, oldName, item: it } : { kind: 'add', item: it });
