@@ -81,7 +81,7 @@ const ADJ = ['Gilded', 'Rusty', 'Silver', 'Crooked', 'Merry', 'Iron', 'Copper', 
 const KIND_WORD = { Alchemist: 'Apothecary', Artificer: 'Workshop', 'Black Market': 'Exchange', Blacksmith: 'Smithy', 'Books & Tomes': 'Books', Fashion: 'Tailor', Fletcher: 'Bowyer',
   'Food & Drink': 'Kitchen', Furniture: 'Joinery', General: 'Goods', Instruments: 'Music', Jewelry: 'Jewelers', Stables: 'Stables', Tattoo: 'Parlor', Temple: 'Shrine' };
 export function shopNameFor(type, keeperName = '') {
-  const n = NOUNS[type] || NOUNS.General, k = KIND_WORD[type] || 'Shop';
+  const n = NOUNS[type] || NOUNS.General, k = KIND_WORD[type] || type || 'Shop'; // a DM's own kind of shop goes by its own name
   const first = String(keeperName).split(' ')[0];
   switch (d(5)) {
     case 1: return `The ${pick(ADJ)} ${pick(n)}`;

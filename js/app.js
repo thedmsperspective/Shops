@@ -191,6 +191,9 @@ function listFor(type) {
   if (usingMine() && LIB.shops?.[type]) return LIB.shops[type].items;
   return SRD_SHOPS[edition()]?.[type] || [];
 }
+// The DM's own kinds of shop (Herbalist, Shipwright…): lists of their own beside the built-in ones
+const ownKinds = () => (usingMine() ? Object.keys(LIB.shops || {}).filter(t => !R.SHOPS.includes(t)) : []);
+const rollingKinds = () => ownKinds().filter(t => LIB.shops[t]?.rolls);
 const goldTable = type => (usingMine() && LIB.shops?.[type]?.gold) || null;
 
 /* ---------- Google Drive: a private file for the shops, and one for the DM's own lists ---------- */
@@ -255,7 +258,7 @@ function ensureGeneral(l) {
   l.shops.unshift(makeShop(R.GENERAL, l)); return true;
 }
 function rollTown(l) {
-  const r = R.rollShops(l.size);
+  const r = R.rollShops(l.size, rollingKinds());
   l.shops = r.shops.map(t => makeShop(t, l));
   l.services = Object.fromEntries(R.SERVICES.map(t => [t, r.services.includes(t) ? 'open' : '']));
 }
@@ -337,7 +340,7 @@ const countdown = s => (s.status === 'closed' ? '' : s.form === 'stall' && s.low
 
 function addShopDialog(l) {
   const have = new Set(l.shops.map(s => s.type));
-  modal(`<h2>Add a shop to ${esc(l.name)}</h2><label>Kind of shop</label><select id="st">${R.SHOPS.map(t => `<option ${have.has(t) ? 'disabled' : ''}>${t}</option>`).join('')}</select>
+  modal(`<h2>Add a shop to ${esc(l.name)}</h2><label>Kind of shop</label><select id="st">${listTypes().map(t => `<option ${have.has(t) ? 'disabled' : ''}>${t}</option>`).join('')}</select>
     <label>Quality</label><select id="sq"><option value="">Roll it (d20)</option>${[1, 2, 3, 4, 5].map(q => `<option value="${q}">Quality ${q}</option>`).join('')}</select>
     <div class="row" style="margin-top:12px"><button class="pri" id="sa">Add</button><button id="sx">Cancel</button></div>`, m => {
     $('#sx', m).onclick = closeModal;
@@ -528,10 +531,48 @@ function listsView(app) {
   const mine = usingMine();
   app.innerHTML = `<div class="card"><h2>Shop lists</h2>
     <p class="mu small">Every shop type and every item it can carry. ${mine ? 'These are your own lists, kept privately in your Google Drive. Change an item and it changes in every shop of that type, in every town.' : `These are the SRD's lists for the ${edition()} rules. To change them, make your own copy first.`}</p>
-    ${mine ? '' : '<div class="row"><button class="pri" id="mkOwn">Make my own copy to edit</button></div>'}
+    ${mine ? '<div class="row"><button class="pri" id="newKind">+ New kind of shop</button></div>' : '<div class="row"><button class="pri" id="mkOwn">Make my own copy to edit</button></div><p class="mu small">Making your own copy also lets you add your own kinds of shop (a Herbalist, a Shipwright…).</p>'}
     <div class="grid" style="margin-top:10px">${listTypes().map(t => { const items = masterOf(t), np = items.filter(x => !Number(x.value) && !x.unlimited && !x.donation).length; return `<button class="tile" data-type="${esc(t)}"><b>${esc(t)}</b><span class="mu">${items.length} item${items.length === 1 ? '' : 's'}</span>${np ? `<br><span class="tag bad">${np} without a price</span>` : ''}</button>`; }).join('')}</div></div>`;
   app.querySelectorAll('[data-type]').forEach(b => { b.onclick = () => go('list', { type: b.dataset.type, q: '' }); });
   const mk = $('#mkOwn'); if (mk) mk.onclick = () => { ownLists(); toast('Your own copy is ready. Edit away.'); render(); };
+  const nk = $('#newKind'); if (nk) nk.onclick = () => kindDialog('');
+}
+// Make, rename or remove one of your own kinds of shop
+function kindDialog(type) {
+  const k = type ? LIB.shops[type] : null;
+  modal(`<h2>${type ? `Change ${esc(type)}` : 'A new kind of shop'}</h2>
+    <label>Name (Herbalist, Shipwright, Cartographer…)</label><input id="kn" maxlength="40" value="${esc(type)}" autocomplete="off">
+    <label style="margin:8px 0"><input type="checkbox" id="kr" style="width:auto" ${!k || k.rolls ? 'checked' : ''}> Can open on its own when a town rolls its shops, and in new months (like the built-in kinds)</label>
+    <p class="mu small">Otherwise it only opens where you add it with + Add a shop. Either way it has its own item list, quality, stock, gold and haggling like every other shop.</p>
+    <div class="row" style="margin-top:12px"><button class="pri" id="ks">${type ? 'Save' : 'Make it'}</button><button id="kx">Cancel</button><span class="grow"></span>${type ? '<button class="bad" id="kd">Remove this kind</button>' : ''}</div>`, m => {
+    $('#kx', m).onclick = closeModal;
+    $('#ks', m).onclick = () => {
+      const name = $('#kn', m).value.trim().replace(/\s+/g, ' ');
+      if (!name) return toast('Give it a name.');
+      if (name !== type && (listTypes().some(t => t.toLowerCase() === name.toLowerCase()) || R.SERVICES.includes(name))) return toast(`There's already a kind of shop called ${name}.`);
+      if (!type) LIB.shops[name] = { items: [], custom: true, rolls: $('#kr', m).checked };
+      else {
+        const v = { ...LIB.shops[type], rolls: $('#kr', m).checked };
+        if (name !== type) {
+          delete LIB.shops[type];
+          for (const l of S.locations) for (const s of l.shops) if (s.type === type) s.type = name;
+          save();
+        }
+        LIB.shops[name] = v;
+      }
+      saveLib(); closeModal();
+      toast(type ? 'Saved.' : `${name} is ready. Add its items.`);
+      go('list', { type: name, q: '' });
+    };
+    const del = $('#kd', m);
+    if (del) del.onclick = () => {
+      const n = S.locations.reduce((a, l) => a + l.shops.filter(s => s.type === type).length, 0);
+      if (!confirm(`Remove ${type} and its item list?${n ? ` The ${n} ${type} shop${n === 1 ? '' : 's'} in your towns close for good.` : ''}`)) return;
+      delete LIB.shops[type];
+      for (const l of S.locations) l.shops = l.shops.filter(s => s.type !== type);
+      saveLib(); save(); closeModal(); go('lists'); toast(`${type} removed.`);
+    };
+  });
 }
 const ruleText = (it, q) => { const r = R.ruleOf(it); if (it.unlimited) return '∞'; const dv = r?.d?.[q - 1], m = r?.m?.[q - 1]; if (!dv || !m) return '—'; return Array.isArray(dv) ? `${dv[0]}–${dv[1]}${m > 1 ? ` ×${m}` : ''}` : `${dv}${m > 1 ? ` ×${m}` : ''}`; };
 function listView(app) {
@@ -540,7 +581,7 @@ function listView(app) {
   const q = (ui.q || '').toLowerCase();
   const shown = items.map((it, i) => ({ it, i })).filter(x => !q || x.it.name.toLowerCase().includes(q));
   const groups = [...R.BANDS.map((b, i) => ({ b: `${b} Quality`, list: shown.filter(x => x.it.band === i) })), { b: 'Other', list: shown.filter(x => !(x.it.band >= 0 && x.it.band <= 4)) }].filter(g => g.list.length);
-  app.innerHTML = `<div class="card"><div class="row"><h2 class="grow">${esc(type)}</h2>${mine ? '<button class="pri" id="addM">+ Add an item</button>' : '<button class="pri" id="mkOwn">Make my own copy to edit</button>'}</div>
+  app.innerHTML = `<div class="card"><div class="row"><h2 class="grow">${esc(type)}</h2>${mine && ownKinds().includes(type) ? '<button id="editKind">Rename or remove</button>' : ''}${mine ? '<button class="pri" id="addM">+ Add an item</button>' : '<button class="pri" id="mkOwn">Make my own copy to edit</button>'}</div>
     <p class="mu small">${items.length} items. Restock shows how many come in each month at Quality 1 to 5 (a roll, times the number after ×). ${mine ? 'Tap an item to change it.' : ''}</p>
     <input id="fq" placeholder="Search ${esc(type)}" value="${esc(ui.q || '')}" autocomplete="off"></div>
     <div class="card"><table class="stock"><thead><tr><th>Item</th><th class="num">Price</th>${[1, 2, 3, 4, 5].map(n => `<th class="num hide-s">Q${n}</th>`).join('')}</tr></thead>
@@ -550,6 +591,7 @@ function listView(app) {
   const mk = $('#mkOwn'); if (mk) mk.onclick = () => { ownLists(); toast('Your own copy is ready. Edit away.'); render(); };
   if (!mine) return;
   const a = $('#addM'); if (a) a.onclick = () => itemDialog(type, -1);
+  const ek = $('#editKind'); if (ek) ek.onclick = () => kindDialog(type);
   app.querySelectorAll('[data-i]').forEach(r => { r.onclick = () => itemDialog(type, Number(r.dataset.i)); });
 }
 function itemDialog(type, idx) {
@@ -623,7 +665,7 @@ function newMonth() {
       if (s.status !== 'closed') report.push({ town: l.name, shop: shopTitle(ns), line, change: r.change });
     }
     // room for more? one new shop may open, as a stall (Quality 1–2)
-    const t = R.rollNewShop(l.size, l.shops);
+    const t = R.rollNewShop(l.size, l.shops, rollingKinds());
     if (t) {
       const ns = makeShop(t, l, R.rollQuality(Math.min(2, R.qualityCap(l.size))));
       ns.form = 'stall'; ns.log = ['Opened as a stall'];

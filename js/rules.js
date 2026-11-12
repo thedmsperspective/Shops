@@ -217,24 +217,26 @@ export const GENERAL = 'General';
 export const qualityCap = sizeKey => Math.max(1, sizeOf(sizeKey).maxQ || 0);
 /** Which shops a settlement has: the General Store, then a d100 each for the rest (green shops and the two services
  *  by their own odds), at most one service for every 4 green shops, and no more than the settlement's maximum. */
-export function rollShops(sizeKey) {
+export function rollShops(sizeKey, extra = []) {
   const s = sizeOf(sizeKey);
   if (!s.maxShops) return { shops: [GENERAL], services: [] };
-  const rolled = SHOPS.filter(t => t !== GENERAL).map(t => ({ t, r: d(100) })).filter(x => x.r >= s.green).sort((a, b) => b.r - a.r).slice(0, s.maxShops);
+  // extra: the DM's own kinds of shop that roll like the rest
+  const order = t => { const i = SHOPS.indexOf(t); return i < 0 ? 100 : i; };
+  const rolled = [...SHOPS, ...extra.filter(t => !SHOPS.includes(t))].filter(t => t !== GENERAL).map(t => ({ t, r: d(100) })).filter(x => x.r >= s.green).sort((a, b) => b.r - a.r).slice(0, s.maxShops);
   const room = Math.min(Math.floor(rolled.length / 4), s.maxShops - rolled.length);
   const services = SERVICES.map(t => ({ t, r: d(100) })).filter(x => x.r >= s.red).sort((a, b) => b.r - a.r).slice(0, Math.max(0, room)).map(x => x.t);
-  return { shops: [GENERAL, ...rolled.map(x => x.t)].sort((a, b) => SHOPS.indexOf(a) - SHOPS.indexOf(b)), services };
+  return { shops: [GENERAL, ...rolled.map(x => x.t)].sort((a, b) => order(a) - order(b)), services };
 }
 
 /** A new month in a settlement below its limit: one d100 at the settlement's odds; if it makes it, one shop type the
  *  settlement doesn't have open opens (at random). Returns the type, or '' if none opens. */
-export function rollNewShop(sizeKey, shops) {
+export function rollNewShop(sizeKey, shops, extra = []) {
   const s = sizeOf(sizeKey);
   const open = shops.filter(x => x.status !== 'closed' && x.type !== GENERAL);
   if (!s.maxShops || open.length >= s.maxShops) return '';
   if (d(100) < s.green) return '';
   const have = new Set(open.map(x => x.type));
-  const missing = SHOPS.filter(t => t !== GENERAL && !have.has(t));
+  const missing = [...SHOPS, ...extra.filter(t => !SHOPS.includes(t))].filter(t => t !== GENERAL && !have.has(t));
   return missing.length ? pick(missing) : '';
 }
 
