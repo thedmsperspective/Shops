@@ -55,7 +55,7 @@ function draw() {
   const svc = Object.entries(view.services || {}).filter(([, v]) => v).map(([k, v]) => `<span class="tag ${v === 'open' ? 'ok' : ''}">${esc(k)}: ${v === 'open' ? 'open' : 'closed'}</span>`).join('');
   const shop = open && view.shops.find(s => s.id === open);
   if (!shop) {
-    app.innerHTML = `<div class="card"><h2>${esc(view.town)}</h2>${who}${svc ? `<p class="small">Also in town (ask your DM): ${svc}</p>` : ''}</div>
+    app.innerHTML = `<div class="card"><h2>${esc(view.town)}</h2>${who}${svc ? `<p class="small">Also in town (ask your DM): ${svc}</p>` : ''}</div>${serviceCards()}
       <div class="grid">${view.shops.map(s => `<button class="tile ${s.status === 'closed' ? 'closed' : ''}" data-shop="${s.id}"><b>${esc(s.name)}</b><span class="mu">${esc(s.type)}</span><br>
         <span class="small">${esc(s.keeper?.name || '')}${s.keeper?.race ? `, ${esc([s.keeper.gender, s.keeper.race].filter(Boolean).join(' '))}` : ''}</span>${s.status === 'closed' ? '<br><span class="tag bad">Closed</span>' : ''}${wonBy(s, c) ? '<br><span class="tag ok">Your haggled prices</span>' : ''}</button>`).join('')}</div>`;
     app.querySelectorAll('[data-shop]').forEach(b => { b.onclick = () => { open = b.dataset.shop; tab = 'buy'; draw(); window.scrollTo(0, 0); }; });
@@ -65,6 +65,7 @@ function draw() {
     app.innerHTML = `<div class="card"><div class="row"><button class="sm" id="out">← ${esc(view.town)}</button></div>
       <h2>${esc(shop.name)}</h2><p class="mu">${esc(shop.type)} · ${esc(shop.keeper?.name || '')}${shop.keeper?.race ? `, ${esc([shop.keeper.gender, shop.keeper.race].filter(Boolean).join(' '))}` : ''}</p>${haggleLine(shop, c)}${who}
       <div class="row"><button id="tbuy" aria-pressed="${tab === 'buy'}">Buy</button><button id="tsell" aria-pressed="${tab === 'sell'}">Sell</button></div></div>
+      ${shop.status !== 'closed' ? fixCard(shop, c) : ''}
       ${shop.status === 'closed' ? '<div class="warn">This shop is closed.</div>' : tab === 'buy' ? `<div class="card"><table class="stock"><thead><tr><th>Item</th><th class="num">In stock</th><th class="num">Price</th><th></th></tr></thead><tbody>
         ${bands.map(g => `<tr class="band"><td colspan="4">${g.b} Quality</td></tr>${g.items.map(it => `<tr><td>${esc(it.n)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.base ? `<br><label class="small mu">Made from <select class="sm" data-base="${it.id}">${it.base.map((b, k) => `<option value="${k}">${esc(b.n)}: ${R.money(priceOf(b, shop, c))}</option>`).join('')}</select></label>` : ''}${it.d ? `<br><small class="mu">${esc(it.d)}</small>` : ''}</td><td class="num">${it.q == null ? '∞' : it.q}</td><td class="num">${it.don ? '<span class="mu">By donation</span>' : `${it.base ? 'from ' : ''}${R.money(priceOf(it, shop, c))}`}</td><td>${it.don ? `<button class="sm pri" data-don="${it.id}" ${busy || !c ? 'disabled' : ''}>Donate</button>` : `<button class="sm pri" data-buy="${it.id}" ${busy || !c ? 'disabled' : ''}>Buy</button>`}</td></tr>`).join('')}`).join('') || '<tr><td class="mu">Nothing on the shelf right now.</td></tr>'}
       </tbody></table></div>` : `<div class="card"><p class="mu small">${shop.buysAll ? `${esc(shop.name)} buys almost anything. For things it doesn't stock, ask for an offer.` : `${esc(shop.name)} only buys the kinds of things it sells.`}</p>
@@ -77,10 +78,79 @@ function draw() {
     app.querySelectorAll('[data-buy]').forEach(b => { b.onclick = () => buy(shop, shop.items.find(x => x.id === b.dataset.buy)); });
     app.querySelectorAll('[data-sell]').forEach(b => { b.onclick = () => sell(shop, mine.find(x => x.key === b.dataset.sell)); });
     app.querySelectorAll('[data-don]').forEach(b => { b.onclick = () => donate(shop, shop.items.find(x => x.id === b.dataset.don)); });
+    app.querySelectorAll('[data-fix]').forEach(b => { b.onclick = () => fixGear(shop, myGear(c).find(x => x.key === b.dataset.fix), b.dataset.how); });
     app.querySelectorAll('[data-ask]').forEach(b => { b.onclick = () => askOffer(shop, mine.find(x => x.key === b.dataset.ask)); });
     app.querySelectorAll('[data-no]').forEach(b => { b.onclick = async () => { const x = mine.find(y => y.key === b.dataset.no); const r = await ask({ kind: 'decline', shopId: shop.id, offerId: x.offer.id, name: x.name }); if (r.error) toast(r.error); draw(); }; });
   }
   const w = $('#who'); if (w) w.onchange = () => { charId = w.value; try { localStorage.setItem('dmp-shops-char', charId); } catch { /* */ } draw(); };
+}
+
+// ---------- services
+// The Enchanter and the Magic Item Dealer: how they work (the DM's text) and the Enchanter's lists
+const txt = t => (window.DMPText ? window.DMPText.textHTML(t) : `<p style="white-space:pre-wrap">${esc(t)}</p>`);
+function serviceCards() {
+  const info = view.svcInfo || {};
+  return Object.entries(info).map(([k, v]) => `<details class="card svc"><summary><b>${esc(k)}</b>${v.q ? ` <span class="tag">${esc(v.q)} quality</span>` : ''} <span class="mu small">How it works</span></summary>
+    ${k === 'Enchanter' && v.offers?.length ? `<table class="stock"><thead><tr><th>Here</th><th class="num">Price</th><th class="num">Per day</th></tr></thead><tbody>${v.offers.map(o => `<tr><td>${esc(o.n)}</td><td class="num">${Number(o.gp).toLocaleString()} gp</td><td class="num">${o.perDay}</td></tr>`).join('')}</tbody></table>` : ''}
+    ${txt(v.rules || '')}
+    ${k === 'Enchanter' ? [['minor', 'Minor'], ['major', 'Major'], ['legendary', 'Legendary']].filter(([t]) => (v.lists?.[t] || []).length && v.offers?.some(o => o.tier === t)).map(([t, n]) => `<h4>${n} enchantments</h4><table class="stock"><tbody>${v.lists[t].map((e, i) => `<tr><td class="num">${i + 1}</td><td><b>${esc(e.name)}</b>${e.att ? ' <span class="tag">(a)</span>' : ''}<br><span class="small">${esc(e.desc)}</span></td></tr>`).join('')}</tbody></table>`).join('') : ''}
+  </details>`).join('');
+}
+// Notches: gear on your sheet with notches (or dormant magic)
+function myGear(c) {
+  if (!c) return [];
+  const out = [];
+  for (const sec of ['armor', 'weapons']) (c.inv?.[sec] || []).forEach((r, i) => {
+    const n = Number(r.nt) || 0;
+    if (n > 0 || r.mst === 'dormant') out.push({ key: `inv.${sec}.${i}`, sec, i, name: r.name, base: r.name, n, broken: !!r.mx && n >= r.mx, magic: !!r.magic && r.mst !== 'lost', dormant: r.mst === 'dormant' });
+  });
+  for (const m of c.magicItems || []) {
+    const w = (c.wear || {})[m.cid]; if (!w) continue;
+    const n = Number(w.n) || 0;
+    if (n > 0 || w.st === 'dormant') out.push({ key: `mi.${m.cid}`, cid: m.cid, name: m.name, base: m.base || m.name, n, broken: !!w.mx && n >= w.mx, magic: w.st !== 'lost', dormant: w.st === 'dormant', rarity: m.type || '' });
+  }
+  return out;
+}
+function fixCard(shop, c) {
+  if (!view.notches || !c || !['Blacksmith', 'Artificer'].includes(shop.type)) return '';
+  const smith = shop.type === 'Blacksmith', gear = myGear(c).filter(g => (smith ? g.n > 0 : g.dormant));
+  return `<div class="card"><h3>${smith ? 'Repairs' : 'Awaken magic'}</h3>
+    <p class="mu small">${smith ? 'A notched item takes 30 minutes a notch; a broken one at least 8 hours. The price is a share of what the ordinary item is worth.' : 'A broken Rare (or rarer) magic item that\'s been repaired sleeps until an Artificer wakes its magic. The price is a share of what it\'s worth.'}</p>
+    ${gear.length ? `<table class="stock"><tbody>${gear.map(g => `<tr><td>${esc(g.name)}${g.broken ? ' <span class="tag bad">Broken</span>' : g.n ? ` <span class="mu small">${g.n} notch${g.n === 1 ? '' : 'es'}</span>` : ''}${g.dormant ? ' <span class="tag">magic dormant</span>' : ''}</td>
+      <td class="num"><button class="sm pri" data-fix="${esc(g.key)}" data-how="${smith ? 'repair' : 'awaken'}" ${busy ? 'disabled' : ''}>${smith ? 'Repair' : 'Awaken'}…</button></td></tr>`).join('')}</tbody></table>`
+      : `<p class="mu">${smith ? 'Nothing on your sheet needs repairing.' : 'Nothing on your sheet has dormant magic.'}</p>`}</div>`;
+}
+async function fixGear(shop, g, how) {
+  const c = me(); if (!c || !g) return;
+  const rep = how === 'repair';
+  const base = { kind: how, shopId: shop.id, item: g.name, base: g.base, broken: g.broken, rarity: g.rarity || '', who: c.name || '', charId: c.id };
+  const q = await ask({ ...base, quote: true });
+  if (q.error) { toast(q.error); draw(); return; }
+  const time = rep ? (g.broken ? 'at least 8 hours' : `${g.n * 30 >= 60 ? `${g.n * 30 / 60} hour${g.n * 30 === 60 ? '' : 's'}` : '30 minutes'}`) : '';
+  if (R.purseCp(purseOfChar(c)) < q.cp) { toast(`That costs ${R.money(q.cp)}, more than you have.`); draw(); return; }
+  if (!confirm(`${rep ? 'Repair' : 'Awaken'} ${g.name} for ${R.money(q.cp)}?${time ? ` It takes ${time}.` : ''}`)) { draw(); return; }
+  const r = await ask({ ...base, purse: purseOfChar(c) });
+  if (r.error) { toast(r.error); draw(); return; }
+  let note = '';
+  await changeSheet(c.id, x => {
+    x.coins = { ...(x.coins || {}), ...R.addCoins(R.addCoins(purseOfChar(x), r.give, -1), r.change) };
+    const paths = ['coins'];
+    if (g.cid) {
+      x.wear = { ...(x.wear || {}) }; const w = x.wear[g.cid] = { n: 0, st: '', ...(x.wear[g.cid] || {}) };
+      if (rep) {
+        if (g.broken && g.magic) { const rr = R.rarityOf(g.rarity); w.st = rr === 'common' || rr === 'uncommon' ? 'lost' : 'dormant'; note = w.st === 'lost' ? ' Its magic is gone: it\'s an ordinary item now.' : ' Its magic is dormant until an Artificer awakens it.'; }
+        w.n = 0;
+      } else w.st = '';
+      paths.push('wear');
+    } else {
+      const row = x.inv?.[g.sec]?.[g.i]; if (row) {
+        if (rep) { if (g.broken && g.magic) { row.mst = 'dormant'; note = ' Its magic is dormant until an Artificer awakens it.'; } delete row.nt; } else delete row.mst;
+        paths.push(`inv.${g.sec}`);
+      }
+    }
+    return paths;
+  });
+  toast(`${g.name} ${rep ? 'repaired' : 'awakened'} for ${R.money(r.cp)}.${note}${R.purseCp(r.change) ? ` Change: ${R.purseText(r.change)}.` : ''}`);
 }
 
 // Inventory rows this shop will buy (by name, the way the shop lists them). The General Store buys anything: rows it

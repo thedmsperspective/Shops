@@ -15,6 +15,22 @@ let core = null;
 const coreReady = import('/core/suite.js').then(m => { core = m; }).catch(() => {});
 import('/core/text.js').catch(() => {}); // indent buttons and bullet lists in every text box
 const edition = () => (core?.tableSettings?.().edition === '2024' ? '2024' : '2014');
+// Notches (Table Rules): weapons and armor break; repairs at a Blacksmith, awakening at an Artificer
+const notchesOn = () => core?.tableSettings?.().notches === 'on';
+// Services: repair and awaken prices, and how the Enchanter and Magic Item Dealer work (each DM's own, private: S.svc)
+function svc() {
+  const v = S.svc || {};
+  return { ...R.SERVICE_DEFAULTS, ...v, rules: { ...R.SERVICE_RULES, ...(v.rules || {}) }, enchants: { minor: [], major: [], legendary: [], ...(v.enchants || {}) } };
+}
+const enchQ = l => Number(l.svcQ?.Enchanter) || 0;
+function rollEnchanter(l) { l.svcQ = { ...(l.svcQ || {}), Enchanter: R.rollEnchanterQuality(R.qualityCap(l.size)) }; }
+// What an ordinary item is worth (for a repair), and a magic item (for awakening): from any shop list, by name
+const plainNm = n => String(n || '').toLowerCase().replace(/\([^)]*\)/g, '').replace(/,?\s*\+\d+/g, '').replace(/\s+armor$/, '').replace(/\s+/g, ' ').trim();
+function valueByName(name, magic) {
+  const want = plainNm(name); if (!want) return 0;
+  for (const t of ['Blacksmith', ...listTypes()]) for (const it of masterOf(t)) if (!!it.magic === !!magic && Number(it.value) && plainNm(it.name) === want) return R.valueCp(it);
+  return 0;
+}
 const isPlayer = () => core?.tableRole?.() === 'player';
 
 /* ---------- storage: this device (IndexedDB) ---------- */
@@ -39,11 +55,19 @@ function publishSoon() { clearTimeout(pubT); pubT = setTimeout(publish, 600); }
 const tablePass = async () => { let p = core.signedIn(''); if (!p && core.refreshNow) p = await core.refreshNow(); return p?.value || null; };
 // The bases a player can choose for an item priced on top of one (the shop's own list first, then the Blacksmith's)
 const basesOf = (s, it, any = false) => R.basesFor(s, it, [masterOf(s.type), masterOf('Blacksmith')], any);
+function svcInfo(l) {
+  const v = svc(), out = {};
+  if (l.services?.Enchanter === 'open') { const q = enchQ(l) || 3; out.Enchanter = { q: R.BANDS[q - 1], offers: R.offersAt(q).map(o => ({ n: o.name, gp: o.gp, perDay: o.perDay, tier: o.tier })), rules: v.rules.Enchanter, lists: v.enchants }; }
+  if (l.services?.['Magic Item Dealer'] === 'open') out['Magic Item Dealer'] = { rules: v.rules['Magic Item Dealer'] };
+  return out;
+}
 function playerView() {
   const l = S.locations.find(x => x.partyHere && x.open);
   if (!l) return { closed: true, t: Date.now() };
   return {
     town: l.name, size: l.size, services: l.services || {}, t: Date.now(),
+    // how the open services work (the DM's own text and Enchanter's lists), and whether gear can be repaired here
+    svcInfo: svcInfo(l), notches: notchesOn(),
     shops: l.shops.map(s => ({
       id: s.id, name: shopTitle(s), type: s.type, status: s.status,
       haggle: { kind: R.haggleKind(s), skill: s.haggle?.skill || 'Persuasion', dc: s.haggle?.dc || 0, off: s.haggle?.off || 0, favor: s.haggle?.favor || '' },
@@ -105,6 +129,26 @@ async function listenToPlayers() {
         l.shops[i] = { ...r.shop, offers: (sh.offers || []).filter(o => o !== off), log: [...(r.shop.log || []), `${req.who || 'A player'} sold ${req.name} for ${R.purseText(r.paid)}`].slice(-40) };
         ans = { ok: true, cp: r.cp, paid: r.paid };
         toast(`${req.who || 'A player'} sold ${req.name} to ${shopTitle(l.shops[i])}.`);
+      }
+    } else if (req.kind === 'repair' || req.kind === 'awaken') {
+      // Notches: a Blacksmith repairs (a share of the ordinary item's value); an Artificer awakens dormant magic
+      const s0 = l.shops[i], v = svc(), rep = req.kind === 'repair';
+      let value = 0;
+      if (!notchesOn()) ans = { error: "Repairs and awakening aren't used at this table." };
+      else if (rep && s0.type !== 'Blacksmith') ans = { error: 'Only a blacksmith does repairs.' };
+      else if (!rep && s0.type !== 'Artificer') ans = { error: 'Only an Artificer can awaken magic.' };
+      else if (!(value = rep ? valueByName(req.base, false) : valueByName(req.item, true) || (R.RARITY_VALUE[R.rarityOf(req.rarity)] || 0) * 100)) ans = { error: rep ? `They don't know what ${req.base || 'that'} is worth here. Ask your DM.` : "They can't tell what it's worth. Ask your DM." };
+      else {
+        const cp = R.servicePrice(s0, value, rep ? (req.broken ? v.repairB : v.repairN) : v.awaken);
+        if (req.quote) ans = { ok: true, quote: true, cp };
+        else {
+          const r = R.servicePay(s0, cp, req.purse || {});
+          if (r.error) ans = { error: r.error };
+          else {
+            l.shops[i] = { ...r.shop, log: [...(r.shop.log || []), `${req.who || 'A player'} paid ${R.money(cp)} to ${rep ? 'repair' : 'awaken'} ${req.item || req.base}`].slice(-40) };
+            ans = { ok: true, cp, give: r.give, change: r.change };
+          }
+        }
       }
     } else if (req.kind === 'donate') {
       const r = R.donate(l.shops[i], req.itemId, req.cp, req.purse || {});
@@ -261,6 +305,7 @@ function rollTown(l) {
   const r = R.rollShops(l.size, rollingKinds());
   l.shops = r.shops.map(t => makeShop(t, l));
   l.services = Object.fromEntries(R.SERVICES.map(t => [t, r.services.includes(t) ? 'open' : '']));
+  if (l.services.Enchanter) rollEnchanter(l);
 }
 
 /* ---------- screens ---------- */
@@ -268,12 +313,13 @@ let playerStarted = false;
 function render() {
   const app = $('#app');
   $('#back').hidden = ui.view === 'home';
-  $('#crumb').textContent = ui.view === 'shop' ? `${loc()?.name || ''}` : ui.view === 'list' ? 'Shop lists' : '';
+  $('#crumb').textContent = ui.view === 'shop' ? `${loc()?.name || ''}` : ui.view === 'list' ? 'Shop lists' : ui.view === 'services' ? 'Services' : '';
   if (isPlayer()) { if (!playerStarted) { playerStarted = true; $('#settingsBtn').hidden = true; startPlayer(core, { toast }); } return; }
   if (ui.view === 'location' && loc()) return locationView(app);
   if (ui.view === 'shop' && shopOf()) return shopView(app);
   if (ui.view === 'settings') return settingsView(app);
   if (ui.view === 'lists') return listsView(app);
+  if (ui.view === 'services') return servicesView(app);
   if (ui.view === 'list' && ui.type) return listView(app);
   ui.view = 'home'; homeView(app);
 }
@@ -314,7 +360,8 @@ function locationView(app) {
   const l = loc(), sz = R.sizeOf(l.size);
   const svc = R.SERVICES.map(t => {
     const v = l.services?.[t] || '';
-    return `<div class="row"><b class="grow">${t}</b><select data-svc="${t}" style="width:auto"><option value="" ${!v ? 'selected' : ''}>Not in this town</option><option value="open" ${v === 'open' ? 'selected' : ''}>Here, open</option><option value="closed" ${v === 'closed' ? 'selected' : ''}>Here, closed</option></select></div>`;
+    const q = t === 'Enchanter' && v ? `<select data-svcq style="width:auto" aria-label="Enchanter quality">${[3, 4, 5].map(x => `<option value="${x}" ${enchQ(l) === x ? 'selected' : ''}>${R.BANDS[x - 1]}</option>`).join('')}</select>` : '';
+    return `<div class="row"><b class="grow">${t}</b>${q}<select data-svc="${t}" style="width:auto"><option value="" ${!v ? 'selected' : ''}>Not in this town</option><option value="open" ${v === 'open' ? 'selected' : ''}>Here, open</option><option value="closed" ${v === 'closed' ? 'selected' : ''}>Here, closed</option></select></div>`;
   }).join('');
   app.innerHTML = `${appraisalsCard(l.id)}
   <div class="card"><div class="row"><h2 class="grow">${esc(l.name)}</h2><button class="sm" id="ren">Rename</button></div>
@@ -324,11 +371,13 @@ function locationView(app) {
   <div class="card"><div class="row"><h3 class="grow" style="margin:0">Shops</h3><button id="addShop">+ Add a shop</button><button id="reroll">Roll the town again</button></div>
     <div class="grid" style="margin-top:8px">${l.shops.map(s => `<button class="tile ${s.status === 'closed' ? 'closed' : ''}" data-shop="${s.id}"><b>${esc(shopTitle(s))}</b><span class="mu">${esc(s.type)} · ${qLabel(s.quality)} · ${s.form === 'building' ? 'Building' : 'Stall'}</span><br>
       ${s.status === 'closed' ? '<span class="tag bad">Closed</span>' : ''}${s.haggleWon || (s.haggleBy || []).length ? '<span class="tag ok">Haggled</span>' : ''}${countdown(s)}<span class="tag ${R.shopCp(s) < 0 ? 'bad' : ''}">${R.shopCp(s) < 0 ? 'In debt ' : ''}${R.money(R.shopCp(s), { short: true })}</span></button>`).join('') || '<p class="mu">No shops yet.</p>'}</div></div>
-  <div class="card"><h3>At the table</h3><p class="mu small">Players only see whether these are here and open.</p>${svc}</div>
+  <div class="card"><h3>At the table</h3><p class="mu small">Players see how these work (and the Enchanter's list) while they're here and open. <a href="#" id="svcRules">How they work</a></p>${svc}</div>
   <div class="card"><button class="bad" id="delLoc">Delete this town</button></div>`;
   app.querySelectorAll('[data-shop]').forEach(b => { b.onclick = () => go('shop', { shop: b.dataset.shop }); });
   bindAppraisals(app);
-  app.querySelectorAll('[data-svc]').forEach(s => { s.onchange = () => { l.services = { ...(l.services || {}), [s.dataset.svc]: s.value }; save(); }; });
+  app.querySelectorAll('[data-svc]').forEach(s => { s.onchange = () => { l.services = { ...(l.services || {}), [s.dataset.svc]: s.value }; if (s.dataset.svc === 'Enchanter' && s.value && !enchQ(l)) rollEnchanter(l); save(); render(); }; });
+  const sq = app.querySelector('[data-svcq]'); if (sq) sq.onchange = () => { l.svcQ = { ...(l.svcQ || {}), Enchanter: Number(sq.value) }; save(); };
+  $('#svcRules').onclick = e => { e.preventDefault(); go('services'); };
   $('#open').onclick = () => { l.open = !l.open; save(); render(); };
   $('#here').onclick = () => { const v = !l.partyHere; S.locations.forEach(x => { x.partyHere = false; }); l.partyHere = v; save(); render(); };
   $('#ren').onclick = () => { const n = prompt('Town name', l.name); if (n?.trim()) { l.name = n.trim(); save(); render(); } };
@@ -532,8 +581,10 @@ function listsView(app) {
   app.innerHTML = `<div class="card"><h2>Shop lists</h2>
     <p class="mu small">Every shop type and every item it can carry. ${mine ? 'These are your own lists, kept privately in your Google Drive. Change an item and it changes in every shop of that type, in every town.' : `These are the SRD's lists for the ${edition()} rules. To change them, make your own copy first.`}</p>
     ${mine ? '<div class="row"><button class="pri" id="newKind">+ New kind of shop</button></div>' : '<div class="row"><button class="pri" id="mkOwn">Make my own copy to edit</button></div><p class="mu small">Making your own copy also lets you add your own kinds of shop (a Herbalist, a Shipwright…).</p>'}
+    <div class="row" style="margin-top:8px"><button id="svcGo">Services: Enchanter, Magic Item Dealer, repairs</button></div>
     <div class="grid" style="margin-top:10px">${listTypes().map(t => { const items = masterOf(t), np = items.filter(x => !Number(x.value) && !x.unlimited && !x.donation).length; return `<button class="tile" data-type="${esc(t)}"><b>${esc(t)}</b><span class="mu">${items.length} item${items.length === 1 ? '' : 's'}</span>${np ? `<br><span class="tag bad">${np} without a price</span>` : ''}</button>`; }).join('')}</div></div>`;
   app.querySelectorAll('[data-type]').forEach(b => { b.onclick = () => go('list', { type: b.dataset.type, q: '' }); });
+  $('#svcGo').onclick = () => go('services');
   const mk = $('#mkOwn'); if (mk) mk.onclick = () => { ownLists(); toast('Your own copy is ready. Edit away.'); render(); };
   const nk = $('#newKind'); if (nk) nk.onclick = () => kindDialog('');
 }
@@ -664,6 +715,8 @@ function newMonth() {
       l.shops[i] = ns;
       if (s.status !== 'closed') report.push({ town: l.name, shop: shopTitle(ns), line, change: r.change });
     }
+    // the Enchanter's quality changes with the month too (always Medium or better)
+    if (l.services?.Enchanter) { const was = enchQ(l); rollEnchanter(l); if (was !== enchQ(l)) report.push({ town: l.name, shop: 'Enchanter', line: `Now ${R.BANDS[enchQ(l) - 1]} quality`, change: '' }); }
     // room for more? one new shop may open, as a stall (Quality 1–2)
     const t = R.rollNewShop(l.size, l.shops, rollingKinds());
     if (t) {
@@ -686,6 +739,38 @@ function undoMonth() {
 }
 
 /* ---------- settings ---------- */
+// ---------- Services: your prices for repairs and awakening, and how the Enchanter and Magic Item Dealer work
+const TIERS = [['minor', 'Minor enchantments'], ['major', 'Major enchantments'], ['legendary', 'Legendary enchantments']];
+function servicesView(app) {
+  const v = svc();
+  const ench = TIERS.map(([k, n]) => `<h4 style="margin:12px 0 4px">${n} <span class="mu small">(roll a d10 for a random one)</span></h4>
+    <table class="stock"><thead><tr><th>d10</th><th>Name</th><th>What it does</th><th title="Needs attunement">(a)</th><th></th></tr></thead><tbody>
+    ${(v.enchants[k] || []).map((e, i) => `<tr><td class="num">${i + 1}</td><td><input data-en="${k}.${i}.name" value="${esc(e.name)}" aria-label="Name"></td><td><textarea data-en="${k}.${i}.desc" rows="2" aria-label="What it does">${esc(e.desc)}</textarea></td><td><input type="checkbox" data-en="${k}.${i}.att" ${e.att ? 'checked' : ''} style="width:auto" aria-label="Needs attunement"></td><td><button class="sm bad" data-endel="${k}.${i}" aria-label="Remove">✕</button></td></tr>`).join('') || '<tr><td colspan="5" class="mu">None yet.</td></tr>'}
+    </tbody></table><button class="sm" data-enadd="${k}">+ Add a ${k} enchantment</button>`).join('');
+  app.innerHTML = `<div class="card"><h2>Services</h2><p class="mu small">How the services in your towns work. Everything here is yours: kept privately in your Google Drive, and shown to your players only where a service is open in the town the party is in.</p></div>
+  <div class="card"><h3>Repairs and awakening</h3>
+    <p class="mu small">${notchesOn() ? 'Notches is on in your Table Rules: players see these in Blacksmiths and Artificers, for gear with notches on their sheets.' : 'These go with Notches, which is off in your Table Rules (the launcher).'} A repair costs a share of the ordinary item's value (the longsword under a Flame Tongue); awakening a dormant magic item costs a share of its magic value. A shop's quality changes the price as it does everything else.</p>
+    <div class="row"><label class="grow">Blacksmith repair, notched (% of the item's value)<input type="number" min="0" max="500" data-sv="repairN" value="${esc(v.repairN)}"></label>
+      <label class="grow">Blacksmith repair, broken (%)<input type="number" min="0" max="500" data-sv="repairB" value="${esc(v.repairB)}"></label>
+      <label class="grow">Artificer, awaken (% of its magic value)<input type="number" min="0" max="500" data-sv="awaken" value="${esc(v.awaken)}"></label></div>
+    <p class="mu small">Repairs take 30 minutes a notch; a broken item at least 8 hours. A magic item with no price in your shop lists is valued by rarity (up to ${R.money(R.RARITY_VALUE.common * 100, { short: true })} for Common, ${R.money(R.RARITY_VALUE.uncommon * 100, { short: true })} Uncommon, ${R.money(R.RARITY_VALUE.rare * 100, { short: true })} Rare, ${R.money(R.RARITY_VALUE['very rare'] * 100, { short: true })} Very Rare, ${R.money(R.RARITY_VALUE.legendary * 100, { short: true })} Legendary).</p></div>
+  <div class="card"><h3>Enchanter</h3>
+    <p class="mu small">Rolled like a shop (and again each month), always Medium quality or better.</p>
+    <table class="stock"><thead><tr><th>Quality</th><th>Offer</th><th class="num">Price</th><th class="num">Per day</th></tr></thead><tbody>${R.ENCHANT_OFFERS.map(o => `<tr><td>${R.BANDS[o.q - 1]}${o.q < 5 ? ' and up' : ''}</td><td>${esc(o.name)}</td><td class="num">${o.gp.toLocaleString()} gp</td><td class="num">${o.perDay}</td></tr>`).join('')}</tbody></table>
+    <label style="margin-top:10px">How it works (players read this)</label><textarea data-rule="Enchanter" rows="9">${esc(v.rules.Enchanter)}</textarea>
+    <div class="row"><button class="sm" data-rreset="Enchanter">Back to the starting text</button></div>
+    <h3 style="margin-top:14px">The Enchanter's lists</h3><p class="mu small">Your own enchantments, ten to a list for rolling. They're private to you and your table.</p>${ench}</div>
+  <div class="card"><h3>Magic Item Dealer</h3>
+    <label>How it works (players read this)</label><textarea data-rule="Magic Item Dealer" rows="14">${esc(v.rules['Magic Item Dealer'])}</textarea>
+    <div class="row"><button class="sm" data-rreset="Magic Item Dealer">Back to the starting text</button></div></div>`;
+  const put = fn => { const x = svc(); fn(x); S.svc = x; save(); publishSoon(); };
+  app.querySelectorAll('[data-sv]').forEach(i => { i.onchange = () => put(x => { x[i.dataset.sv] = Math.max(0, Math.min(500, Number(i.value) || 0)); }); });
+  app.querySelectorAll('[data-rule]').forEach(t => { t.onchange = () => put(x => { x.rules[t.dataset.rule] = t.value.trim() || R.SERVICE_RULES[t.dataset.rule]; }); });
+  app.querySelectorAll('[data-rreset]').forEach(b => { b.onclick = () => { if (!confirm('Put back the starting text? Your changes to it go.')) return; put(x => { delete x.rules[b.dataset.rreset]; }); render(); }; });
+  app.querySelectorAll('[data-en]').forEach(i => { i.onchange = () => put(x => { const [k, n, f] = i.dataset.en.split('.'); x.enchants[k][Number(n)][f] = f === 'att' ? i.checked : i.value.trim(); }); });
+  app.querySelectorAll('[data-enadd]').forEach(b => { b.onclick = () => { put(x => { x.enchants[b.dataset.enadd] = [...x.enchants[b.dataset.enadd], { name: '', desc: '', att: false }]; }); render(); }; });
+  app.querySelectorAll('[data-endel]').forEach(b => { b.onclick = () => { const [k, n] = b.dataset.endel.split('.'); put(x => { x.enchants[k].splice(Number(n), 1); }); render(); }; });
+}
 function settingsView(app) {
   app.innerHTML = `
   <div class="card"><h2>Settings</h2>

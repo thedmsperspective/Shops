@@ -337,3 +337,62 @@ export function purchaseAny(shop, name, n, cpEach) {
   if (at >= 0) items[at] = { ...items[at], qty: (items[at].qty || 0) + n }; else items.push(item);
   return { shop: { ...shop, items, purse: addCoins(purseOf(shop), paid, -1) }, cp, paid, item: at >= 0 ? items[at] : item };
 }
+
+/* ---------- services: repairs (Blacksmith), awakening (Artificer), the Enchanter and the Magic Item Dealer ----------
+   Repairs and awakening go with Notches (Table Rules). A repair costs a share of the ordinary item's value (the longsword
+   under a Flame Tongue), more once it's broken; awakening a dormant magic item costs a share of its magic value. */
+export const SERVICE_DEFAULTS = { repairN: 10, repairB: 50, awaken: 10 };
+// What a magic item is worth when no shop list prices it: the top of each rarity's range in the 2014 rules
+export const RARITY_VALUE = { common: 100, uncommon: 500, rare: 5000, 'very rare': 50000, legendary: 100000, artifact: 100000 };
+export const rarityOf = text => (String(text || '').toLowerCase().match(/\b(very rare|uncommon|common|rare|legendary|artifact)\b/g) || []).pop() || '';
+/** A service's price in copper: pct of a value, times the shop's price modifier */
+export const servicePrice = (shop, valueCp, pct) => Math.max(1, Math.round((Number(valueCp) || 0) * (Number(pct) || 0) / 100 * (shop.priceMod || 1)));
+/** The player pays the shop for a service: { shop, cp, give, change } or { error } */
+export function servicePay(shop, cp, playerPurse) {
+  const pay = settle(playerPurse, purseOf(shop), cp);
+  if (pay.error) return pay;
+  return { shop: { ...shop, purse: addCoins(addCoins(purseOf(shop), pay.give), pay.change, -1) }, cp, give: pay.give, change: pay.change };
+}
+/** An Enchanter's quality: rolled like a shop's, but always Medium or better */
+export function rollEnchanterQuality(maxQ = 5) {
+  for (let i = 0; i < 40; i++) { const q = rollQuality(Math.max(3, maxQ)); if (q >= 3) return q; }
+  return 3;
+}
+// The Enchanter's work, by quality (each quality offers its own and everything below it)
+export const ENCHANT_OFFERS = [
+  { q: 3, tier: 'minor', how: 'chosen', name: 'Chosen Minor enchantment', gp: 100, perDay: 5 },
+  { q: 3, tier: 'major', how: 'random', name: 'Random Major enchantment', gp: 500, perDay: 4 },
+  { q: 4, tier: 'major', how: 'chosen', name: 'Chosen Major enchantment', gp: 1000, perDay: 4 },
+  { q: 4, tier: 'legendary', how: 'random', name: 'Random Legendary enchantment', gp: 5000, perDay: 3 },
+  { q: 5, tier: 'legendary', how: 'chosen', name: 'Chosen Legendary enchantment', gp: 10000, perDay: 3 },
+];
+export const offersAt = q => ENCHANT_OFFERS.filter(o => o.q <= q);
+// How each works, for DMs and players who haven't used them. Each DM can rewrite these for their own table.
+export const SERVICE_RULES = {
+  Enchanter: `An Enchanter puts a new enchantment on a weapon, armor or other item. What they can do depends on their quality: a Medium Enchanter offers a chosen Minor enchantment or a random Major one; a Good one also offers a chosen Major or a random Legendary; an Excellent one also offers a chosen Legendary.
+"Chosen" means you pick from the Enchanter's list; "random" means roll a d10 on that list.
+- Chosen Minor: 100 gp (up to 5 a day)
+- Random Major: 500 gp (up to 4 a day)
+- Chosen Major: 1,000 gp (up to 4 a day)
+- Random Legendary: 5,000 gp (up to 3 a day)
+- Chosen Legendary: 10,000 gp (up to 3 a day)
+Enchantments marked (a) need attunement.
+A magic item that broke and lost its magic is an ordinary item again: an Enchanter can give it a new enchantment like any other.`,
+  'Magic Item Dealer': `The Magic Item Dealer doesn't keep a shop: they're a go-between who finds magic items for you, or buyers for yours. Their fee is 20%.
+Buying: tell them what you want. The rarer it is, the less likely they find one, and the longer it takes.
+- Common: 90% chance, d4 weeks
+- Uncommon: 70% chance, d6 weeks
+- Rare: 50% chance, d8 weeks
+- Very Rare: 30% chance, d10 weeks
+- Legendary: 10% chance, d12 weeks
+The seller's asking price (d6): 1 desperate, 50% of the value; 2 reasonable, 75%; 3 firm, 100%; 4 stubborn, 125%; 5 arrogant, 150%; 6 roll again.
+You pay 10% up front and the rest on delivery, or the full price up front.
+Selling: they find you a buyer. The rarer the item, the easier.
+- Common: 50% chance, d4 weeks
+- Uncommon: 70% chance, d6 weeks
+- Rare: 80% chance, d8 weeks
+- Very Rare: 90% chance, d10 weeks
+- Legendary: 95% chance, d12 weeks
+The buyer's offer (d6): 1 lowball, 50% of the value; 2 reasonable, 75%; 3 average, 100%; 4 motivated, 125%; 5 desperate, 150%; 6 roll again.
+Hand the item over now and get 10% of its value right away, or keep it and get nothing until a buyer is found.`,
+};
