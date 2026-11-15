@@ -396,3 +396,23 @@ Selling: they find you a buyer. The rarer the item, the easier.
 The buyer's offer (d6): 1 lowball, 50% of the value; 2 reasonable, 75%; 3 average, 100%; 4 motivated, 125%; 5 desperate, 150%; 6 roll again.
 Hand the item over now and get 10% of its value right away, or keep it and get nothing until a buyer is found.`,
 };
+
+/* ---------- Ammunition dice (a Table Rules option, from Giffyglyph's Darker Dungeons) ----------
+   A stack's die steps d12 → d10 → d8 → d6 → d4 → the last one → gone. A shop that sells that ammunition refills a stack
+   for a share of the full stack's price for each size it goes up; the share depends on the stack's largest die. */
+export const AMMO_STEPS = [0, 1, 4, 6, 8, 10, 12, 20];
+export const AMMO_PCT = { 20: 16, 12: 20, 10: 25, 8: 33, 6: 50, 4: 100 };
+export const ammoName = n => (n >= 4 ? `d${n}` : n === 1 ? 'the last one' : 'none');
+export const ammoMax = r => (AMMO_PCT[Number(r?.max)] ? Number(r.max) : 12);
+export const ammoDie = r => (r?.die == null || r.die === '' ? ammoMax(r) : Math.min(ammoMax(r), AMMO_STEPS.includes(Number(r.die)) ? Number(r.die) : ammoMax(r)));
+/** "Arrows (20)", "Arrows", "arrow" all match */
+export const ammoKey = n => String(n || '').toLowerCase().replace(/\([^)]*\)/g, '').replace(/[^a-z ]/g, '').trim().replace(/s$/, '');
+/** "Bolts" on a sheet is the shop's "Crossbow bolts (20)" */
+export const sameAmmo = (a, b) => { const x = ammoKey(a), y = ammoKey(b); return !!x && !!y && (x === y || x.endsWith(` ${y}`) || y.endsWith(` ${x}`)); };
+/** What a refill costs: from empty, a whole stack; otherwise the share per size, for each size up */
+export function refillPrice(stackCp, max, from, to) {
+  if (!(stackCp > 0) || !(to > from)) return 0;
+  if (from <= 0) return stackCp;
+  const steps = AMMO_STEPS.indexOf(to) - AMMO_STEPS.indexOf(from);
+  return Math.max(1, Math.round(stackCp * (AMMO_PCT[max] || 20) / 100 * steps));
+}

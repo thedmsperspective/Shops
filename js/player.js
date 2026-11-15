@@ -65,7 +65,7 @@ function draw() {
     app.innerHTML = `<div class="card"><div class="row"><button class="sm" id="out">← ${esc(view.town)}</button></div>
       <h2>${esc(shop.name)}</h2><p class="mu">${esc(shop.type)} · ${esc(shop.keeper?.name || '')}${shop.keeper?.race ? `, ${esc([shop.keeper.gender, shop.keeper.race].filter(Boolean).join(' '))}` : ''}</p>${haggleLine(shop, c)}${who}
       <div class="row"><button id="tbuy" aria-pressed="${tab === 'buy'}">Buy</button><button id="tsell" aria-pressed="${tab === 'sell'}">Sell</button></div></div>
-      ${shop.status !== 'closed' ? fixCard(shop, c) : ''}
+      ${shop.status !== 'closed' ? fixCard(shop, c) + refillCard(shop, c) : ''}
       ${shop.status === 'closed' ? '<div class="warn">This shop is closed.</div>' : tab === 'buy' ? `<div class="card"><table class="stock"><thead><tr><th>Item</th><th class="num">In stock</th><th class="num">Price</th><th></th></tr></thead><tbody>
         ${bands.map(g => `<tr class="band"><td colspan="4">${g.b} Quality</td></tr>${g.items.map(it => `<tr><td>${esc(it.n)}${it.magic ? ' <span class="tag ac">magic</span>' : ''}${it.base ? `<br><label class="small mu">Made from <select class="sm" data-base="${it.id}">${it.base.map((b, k) => `<option value="${k}">${esc(b.n)}: ${R.money(priceOf(b, shop, c))}</option>`).join('')}</select></label>` : ''}${it.d ? `<br><small class="mu">${esc(it.d)}</small>` : ''}</td><td class="num">${it.q == null ? '∞' : it.q}</td><td class="num">${it.don ? '<span class="mu">By donation</span>' : `${it.base ? 'from ' : ''}${R.money(priceOf(it, shop, c))}`}</td><td>${it.don ? `<button class="sm pri" data-don="${it.id}" ${busy || !c ? 'disabled' : ''}>Donate</button>` : `<button class="sm pri" data-buy="${it.id}" ${busy || !c ? 'disabled' : ''}>Buy</button>`}</td></tr>`).join('')}`).join('') || '<tr><td class="mu">Nothing on the shelf right now.</td></tr>'}
       </tbody></table></div>` : `<div class="card"><p class="mu small">${shop.buysAll ? `${esc(shop.name)} buys almost anything. For things it doesn't stock, ask for an offer.` : `${esc(shop.name)} only buys the kinds of things it sells.`}</p>
@@ -79,6 +79,7 @@ function draw() {
     app.querySelectorAll('[data-sell]').forEach(b => { b.onclick = () => sell(shop, mine.find(x => x.key === b.dataset.sell)); });
     app.querySelectorAll('[data-don]').forEach(b => { b.onclick = () => donate(shop, shop.items.find(x => x.id === b.dataset.don)); });
     app.querySelectorAll('[data-fix]').forEach(b => { b.onclick = () => fixGear(shop, myGear(c).find(x => x.key === b.dataset.fix), b.dataset.how); });
+    app.querySelectorAll('[data-refill]').forEach(b => { b.onclick = () => { const s = app.querySelector(`[data-refillto="${b.dataset.refill}"]`); refill(shop, myAmmo(shop, c).find(x => String(x.i) === b.dataset.refill), Number(s?.value)); }; });
     app.querySelectorAll('[data-ask]').forEach(b => { b.onclick = () => askOffer(shop, mine.find(x => x.key === b.dataset.ask)); });
     app.querySelectorAll('[data-no]').forEach(b => { b.onclick = async () => { const x = mine.find(y => y.key === b.dataset.no); const r = await ask({ kind: 'decline', shopId: shop.id, offerId: x.offer.id, name: x.name }); if (r.error) toast(r.error); draw(); }; });
   }
@@ -119,6 +120,38 @@ function fixCard(shop, c) {
     ${gear.length ? `<table class="stock"><tbody>${gear.map(g => `<tr><td>${esc(g.name)}${g.broken ? ' <span class="tag bad">Broken</span>' : g.n ? ` <span class="mu small">${g.n} notch${g.n === 1 ? '' : 'es'}</span>` : ''}${g.dormant ? ' <span class="tag">magic dormant</span>' : ''}</td>
       <td class="num"><button class="sm pri" data-fix="${esc(g.key)}" data-how="${smith ? 'repair' : 'awaken'}" ${busy ? 'disabled' : ''}>${smith ? 'Repair' : 'Awaken'}…</button></td></tr>`).join('')}</tbody></table>`
       : `<p class="mu">${smith ? 'Nothing on your sheet needs repairing.' : 'Nothing on your sheet has dormant magic.'}</p>`}</div>`;
+}
+// Ammunition dice: the stacks on your sheet this shop can refill (it sells that ammunition)
+function myAmmo(shop, c) {
+  if (!view.ammo || !c) return [];
+  return (c.ammo || []).map((r, i) => ({ r, i, die: R.ammoDie(r), max: R.ammoMax(r), it: (shop.items || []).find(x => !x.base && R.sameAmmo(x.n, r.name)) }))
+    .filter(x => !x.r.each && x.it && x.die < x.max);
+}
+function refillCard(shop, c) {
+  const list = myAmmo(shop, c); if (!list.length) return '';
+  return `<div class="card"><h3>Refill ammunition</h3><p class="mu small">Each size up costs a share of a full stack's price here. An empty stack costs a whole new stack.</p>
+    <table class="stock"><tbody>${list.map(x => {
+      const ups = R.AMMO_STEPS.filter(s => s > x.die && s <= x.max && s >= 4), stack = priceOf(x.it, shop, c);
+      return `<tr><td>${esc(x.r.name)} <span class="mu small">now ${esc(R.ammoName(x.die))}</span>${x.r.rq ? '<br><span class="tag">Waiting for your DM</span>' : ''}</td>
+        <td><select class="sm" data-refillto="${x.i}">${ups.map(s => `<option value="${s}" ${s === x.max ? 'selected' : ''}>to d${s}: ${R.money(R.refillPrice(stack, x.max, x.die, s))}</option>`).join('')}</select></td>
+        <td class="num"><button class="sm pri" data-refill="${x.i}" ${busy || x.r.rq ? 'disabled' : ''}>Refill</button></td></tr>`;
+    }).join('')}</tbody></table></div>`;
+}
+async function refill(shop, x, to) {
+  const c = me(); if (!c || !x || !to) return;
+  const base = { kind: 'refill', shopId: shop.id, itemId: x.it.id, name: x.r.name || x.it.n, from: x.die, to, max: x.max, who: c.name || '', charId: c.id };
+  const q = await ask({ ...base, quote: true });
+  if (q.error) { toast(q.error); draw(); return; }
+  if (R.purseCp(purseOfChar(c)) < q.cp) { toast(`That costs ${R.money(q.cp)}, more than you have.`); draw(); return; }
+  if (!confirm(`Refill ${base.name} to d${to} for ${R.money(q.cp)}?`)) { draw(); return; }
+  const r = await ask({ ...base, purse: purseOfChar(c) });
+  if (r.error) { toast(r.error); draw(); return; }
+  await changeSheet(c.id, y => {
+    y.coins = { ...(y.coins || {}), ...R.addCoins(R.addCoins(purseOfChar(y), r.give, -1), r.change) };
+    const row = y.ammo?.[x.i]; if (row) { row.die = to; delete row.rq; }
+    return ['coins', 'ammo'];
+  });
+  toast(`${base.name} refilled to d${to} for ${R.money(r.cp)}.${R.purseCp(r.change) ? ` Change: ${R.purseText(r.change)}.` : ''}`);
 }
 async function fixGear(shop, g, how) {
   const c = me(); if (!c || !g) return;

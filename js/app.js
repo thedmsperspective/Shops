@@ -17,6 +17,7 @@ import('/core/text.js').catch(() => {}); // indent buttons and bullet lists in e
 const edition = () => (core?.tableSettings?.().edition === '2024' ? '2024' : '2014');
 // Notches (Table Rules): weapons and armor break; repairs at a Blacksmith, awakening at an Artificer
 const notchesOn = () => core?.tableSettings?.().notches === 'on';
+const ammoOn = () => core?.tableSettings?.().ammo === 'dice';
 // Services: repair and awaken prices, and how the Enchanter and Magic Item Dealer work (each DM's own, private: S.svc)
 function svc() {
   const v = S.svc || {};
@@ -67,7 +68,7 @@ function playerView() {
   return {
     town: l.name, size: l.size, services: l.services || {}, t: Date.now(),
     // how the open services work (the DM's own text and Enchanter's lists), and whether gear can be repaired here
-    svcInfo: svcInfo(l), notches: notchesOn(),
+    svcInfo: svcInfo(l), notches: notchesOn(), ammo: ammoOn(),
     shops: l.shops.map(s => ({
       id: s.id, name: shopTitle(s), type: s.type, status: s.status,
       haggle: { kind: R.haggleKind(s), skill: s.haggle?.skill || 'Persuasion', dc: s.haggle?.dc || 0, off: s.haggle?.off || 0, favor: s.haggle?.favor || '' },
@@ -81,8 +82,20 @@ function playerView() {
     })),
   };
 }
+// Offers waiting for your price, for the request box in your other apps (only you can read it)
+let lastDmq = '';
+async function publishDmQueue() {
+  const list = {};
+  for (const a of S.appraisals || []) {
+    const l = S.locations.find(x => x.id === a.loc), sh = l?.shops.find(s => s.id === a.shopId);
+    list[a.id] = { who: a.who || '', text: `wants an offer for ${a.name}${sh ? ` at ${shopTitle(sh)}` : ''}. Name a price in Shops.`, t: a.at || 0 };
+  }
+  const k = JSON.stringify(list); if (k === lastDmq) return;
+  try { const T = await core.tables(); if (!T.setDmQueue) return; await T.setDmQueue(await tablePass(), core.currentTable().id, 'shops', list); lastDmq = k; } catch (e) { console.warn('dm queue', e); }
+}
 async function publish() {
   if (!amDm()) return;
+  publishDmQueue();
   const v = playerView(), k = JSON.stringify({ ...v, t: 0 });
   if (k === lastPub) return;
   try { const T = await core.tables(); await T.publishShops(await tablePass(), core.currentTable().id, v); lastPub = k; } catch (e) { console.warn('publish shops', e); }
@@ -147,6 +160,28 @@ async function listenToPlayers() {
           else {
             l.shops[i] = { ...r.shop, log: [...(r.shop.log || []), `${req.who || 'A player'} paid ${R.money(cp)} to ${rep ? 'repair' : 'awaken'} ${req.item || req.base}`].slice(-40) };
             ans = { ok: true, cp, give: r.give, change: r.change };
+          }
+        }
+      }
+    } else if (req.kind === 'refill') {
+      // Ammunition dice: a shop that sells the ammunition refills a stack, for a share of the stack's price per size
+      const s0 = l.shops[i], it0 = s0.items.find(x => x.id === req.itemId);
+      const max = R.AMMO_PCT[Number(req.max)] ? Number(req.max) : 12, from = Number(req.from) || 0, to = Number(req.to) || 0;
+      if (!ammoOn()) ans = { error: "Ammunition dice aren't used at this table." };
+      else if (!it0 || !R.sameAmmo(it0.name, req.name)) ans = { error: "This shop doesn't sell that ammunition." };
+      else if (!R.AMMO_STEPS.includes(from) || !R.AMMO_STEPS.includes(to) || to <= from || to > max) ans = { error: 'That refill doesn\'t add up. Check the stack on your sheet.' };
+      else {
+        const stack = R.sellPrice(s0, it0, R.haggledFor(s0, req.who), 0);
+        const cp = R.refillPrice(stack, max, from, to);
+        if (!cp) ans = { error: "They can't price that refill. Ask your DM." };
+        else if (req.quote) ans = { ok: true, quote: true, cp };
+        else {
+          const r = R.servicePay(s0, cp, req.purse || {});
+          if (r.error) ans = { error: r.error };
+          else {
+            l.shops[i] = { ...r.shop, log: [...(r.shop.log || []), `${req.who || 'A player'} paid ${R.money(cp)} to refill ${req.name} (${R.ammoName(from)} → ${R.ammoName(to)})`].slice(-40) };
+            ans = { ok: true, cp, give: r.give, change: r.change };
+            toast(`${req.who || 'A player'} refilled ${req.name} at ${shopTitle(l.shops[i])}.`);
           }
         }
       }
