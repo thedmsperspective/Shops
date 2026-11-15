@@ -227,8 +227,19 @@ async function buy(shop, it0) {
   if (R.purseCp(purseOfChar(c)) < priceOf(it, shop, c)) { toast("You don't have enough coin for that."); return; }
   const r = await ask({ kind: 'buy', shopId: shop.id, itemId: it.id, n: 1, purse: purseOfChar(c), who: c.name || '', charId: c.id, ...(base ? { base } : {}) });
   if (r.error) { toast(r.error); draw(); return; }
+  // used up (a potion, a torch, alchemist's fire): it goes in the sheet's Consumables, stacked
+  const V = await core.views?.().catch(() => null);
+  const used = !!V && (it.magic ? V.isConsumable({ name: it.n }) : V.consumableName(it.n));
   await changeSheet(c.id, x => {
     x.coins = { ...(x.coins || {}), ...R.addCoins(R.addCoins(purseOfChar(x), r.give, -1), r.change) };
+    if (used) {
+      const list = (x.consumables = x.consumables || []);
+      const row = list.find(y => String(y.name).toLowerCase() === it.n.toLowerCase() && !!y.magic === !!it.magic);
+      if (row) row.n = n(row.n || 1) + 1;
+      // a magic one waits here until the Magic Items app gives the real card
+      else list.push({ id: P.model.uid(), name: it.n, n: 1, ...(it.magic ? { magic: true, fromShop: true } : {}), desc: it.magic ? '' : (it.d || '') });
+      return ['coins', 'consumables'];
+    }
     const cat = catFor(shop.type, it);
     const list = (x.inv[cat] = x.inv[cat] || []);
     const row = list.find(y => String(y.name).toLowerCase() === it.n.toLowerCase());
