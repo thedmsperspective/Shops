@@ -88,7 +88,7 @@ async function publishDmQueue() {
   const list = {};
   for (const a of S.appraisals || []) {
     const l = S.locations.find(x => x.id === a.loc), sh = l?.shops.find(s => s.id === a.shopId);
-    list[a.id] = { who: a.who || '', text: `wants an offer for ${a.name}${sh ? ` at ${shopTitle(sh)}` : ''}. Name a price in Shops.`, t: a.at || 0 };
+    list[a.id] = { who: a.who || '', text: `wants an offer for ${a.name}${sh ? ` at ${shopTitle(sh)}` : ''}${worthText(a) ? ` (${worthText(a)})` : ''}. Name a price in Shops.`, t: a.at || 0 };
   }
   const k = JSON.stringify(list); if (k === lastDmq) return;
   try { const T = await core.tables(); if (!T.setDmQueue) return; await T.setDmQueue(await tablePass(), core.currentTable().id, 'shops', list); lastDmq = k; } catch (e) { console.warn('dm queue', e); }
@@ -122,13 +122,14 @@ async function listenToPlayers() {
       }
     } else if (req.kind === 'quote') {
       // the General Store's offer for something it doesn't stock: from your lists, or you name a price
-      const sh = l.shops[i], cp = priceGuess(sh, req.name, req.who);
+      // loot from your Session Notes always comes to you, with what it's really worth beside it
+      const sh = l.shops[i], cp = req.lootId ? 0 : priceGuess(sh, req.name, req.who);
       const off = (sh.offers || []).find(o => o.name.toLowerCase() === String(req.name).toLowerCase() && (!o.who || o.who === req.who));
       if (off) ans = off.refused ? { ok: true, refused: true } : { ok: true, quote: off.cp, offerId: off.id };
       else if (cp) ans = { ok: true, quote: cp };
       else {
         S.appraisals = (S.appraisals || []).filter(a => !(a.shopId === sh.id && a.name.toLowerCase() === String(req.name).toLowerCase() && a.who === req.who));
-        S.appraisals.push({ id: rid, uid, who: req.who || '', loc: l.id, shopId: sh.id, name: String(req.name || '').slice(0, 100), at: Date.now() });
+        S.appraisals.push({ id: rid, uid, who: req.who || '', loc: l.id, shopId: sh.id, name: String(req.name || '').slice(0, 100), at: Date.now(), ...(req.lootId ? { lootId: String(req.lootId).slice(0, 40) } : {}) });
         ans = { ok: true, pending: true };
         toast(`${req.who || 'A player'} wants an offer for ${req.name} at ${shopTitle(sh)}.`);
       }
@@ -246,12 +247,31 @@ function priceGuess(shop, name, who = '') {
   for (const list of lists) { const it = list.find(x => Number(x.value) && x.name.toLowerCase() === want); if (it) return R.buyPrice(shop, it, hag); }
   return 0;
 }
+// Loot from your Session Notes (on this device): its true value, and what the player was told
+let LOOT = new Map(), lootAt = 0;
+function loadLoot() {
+  if (Date.now() - lootAt < 5000) return; lootAt = Date.now();
+  (async () => {
+    if (indexedDB.databases && !(await indexedDB.databases()).some(x => x.name === 'session-notes')) return;
+    const list = await new Promise(res => {
+      const r = indexedDB.open('session-notes');
+      r.onupgradeneeded = () => { r.transaction.abort(); res([]); };
+      r.onerror = () => res([]);
+      r.onsuccess = () => { const db = r.result; if (!db.objectStoreNames.contains('loot')) { db.close(); return res([]); } const g = db.transaction('loot').objectStore('loot').getAll(); g.onsuccess = () => { db.close(); res(g.result || []); }; g.onerror = () => { db.close(); res([]); }; };
+    });
+    const m = new Map(list.map(x => [x.id, x]));
+    const changed = JSON.stringify([...m.entries()].map(([k, v]) => [k, v.value, v.shown])) !== JSON.stringify([...LOOT.entries()].map(([k, v]) => [k, v.value, v.shown]));
+    LOOT = m; if (changed && (S.appraisals || []).some(a => a.lootId)) { render(); publishDmQueue(); }
+  })().catch(() => {});
+}
+const worthText = a => { const x = a.lootId && LOOT.get(a.lootId); return x ? `Worth ${x.value || 'no value set'}${x.shown ? ` · they were told ${x.shown}` : ' · they don\'t know its value'}` : ''; };
 // Things players brought to a General Store that need your price
 function appraisalsCard(only) {
+  loadLoot();
   const list = (S.appraisals || []).filter(a => !only || a.loc === only);
   if (!list.length) return '';
   return `<div class="card" style="border-color:var(--ac)"><h3 style="margin-top:0">Waiting for your offer</h3><p class="mu small">Your players want to sell these to a General Store, and your lists don't have a price for them. Offer what the store pays for one (it buys at half value, so think of half what it's worth).</p>
-    ${list.map(a => { const l = S.locations.find(x => x.id === a.loc), sh = l?.shops.find(x => x.id === a.shopId); return `<div class="row" style="margin:6px 0"><span class="grow"><b>${esc(a.name)}</b><br><span class="mu small">${esc(a.who || 'A player')} · ${esc(sh ? shopTitle(sh) : 'General Store')}${l ? `, ${esc(l.name)}` : ''}</span></span>
+    ${list.map(a => { const l = S.locations.find(x => x.id === a.loc), sh = l?.shops.find(x => x.id === a.shopId); return `<div class="row" style="margin:6px 0"><span class="grow"><b>${esc(a.name)}</b><br><span class="mu small">${esc(a.who || 'A player')} · ${esc(sh ? shopTitle(sh) : 'General Store')}${l ? `, ${esc(l.name)}` : ''}</span>${worthText(a) ? `<br><b class="small" style="color:var(--ac)">${esc(worthText(a))}</b>` : ''}</span>
       <input class="n" data-ap="${a.id}" placeholder="gp" inputmode="decimal" aria-label="Offer in gp"><button class="sm pri" data-apo="${a.id}">Offer</button><button class="sm" data-apn="${a.id}">Won't buy</button></div>`; }).join('')}</div>`;
 }
 function bindAppraisals(app) {
@@ -570,7 +590,7 @@ function bindHaggle(app, s) {
 // What new shops are stocked from, and what every shop of a type follows: change an item here and it changes in every
 // shop of that type in every town (shelf counts stay). Items added here reach shelves at the next new month.
 const COIN_LIST = ['cp', 'sp', 'gp', 'pp'];
-const INV_SECTIONS = [['', 'Let Shops decide (by the shop and the item)'], ['armor', 'Armor & Clothing'], ['weapons', 'Weapons'], ['tools', 'Tools & Kits'], ['treasure', 'Treasure & Trinkets'], ['components', 'Spell Components'], ['general', 'General Items']];
+const INV_SECTIONS = [['', 'Let Shops decide (by the shop and the item)'], ['armor', 'Armor & Clothing'], ['weapons', 'Weapons'], ['treasure', 'Treasure & Trinkets'], ['gear', 'Gear']];
 const BAND_D = [[[1, 3], [1, 3], [1, 4], [2, 5], [2, 5]], [0, [1, 3], [1, 4], [2, 5], [2, 5]], [0, 0, [1, 4], [2, 5], [2, 5]], [0, 0, 0, [2, 5], [2, 5]], [0, 0, 0, 0, [2, 5]]];
 const defaultRule = (band, magic) => ({ d: JSON.parse(JSON.stringify(BAND_D[band] || BAND_D[0])), m: magic ? [1, 1, 1, 1, 1] : [3, 5, 8, 10, 15] });
 const listTypes = () => { const own = usingMine() ? Object.keys(LIB.shops || {}) : []; return [...R.SHOPS, ...own.filter(t => !R.SHOPS.includes(t))]; };

@@ -266,7 +266,7 @@ async function donate(shop, it) {
 // The General Store: what would it pay for this? An offer at once (from the DM's lists), or the DM names one later
 async function askOffer(shop, x) {
   const c = me(); if (!c || !x) return;
-  const r = await ask({ kind: 'quote', shopId: shop.id, name: x.name, n: 1, who: c.name || '' });
+  const r = await ask({ kind: 'quote', shopId: shop.id, name: x.name, n: 1, who: c.name || '', ...(x.row?.lootId ? { lootId: String(x.row.lootId) } : {}) });
   if (r.error) { toast(r.error); draw(); return; }
   if (r.refused) { toast(`${shop.name} won't buy that.`); draw(); return; }
   if (r.pending) { asked.add(askKey(c, x.name)); keepAsked(); toast(`${shop.name} will think it over. Your DM names a price; check back here.`); draw(); return; }
@@ -288,16 +288,14 @@ async function sell(shop, x) {
 }
 // Which inventory section a bought item goes in: the DM's own choice for the item, else a guess from the shop and the name
 const catFor = (type, it) => {
-  if (it.inv) return it.inv;
-  if (it.magic) return 'general';
+  if (it.inv) return ['tools', 'components', 'general'].includes(it.inv) ? 'gear' : it.inv; // those three are one Gear section now
+  if (it.magic) return 'gear';
   const n = it.n || '';
-  if (/component|spellcasting focus|arcane focus|druidic focus|holy symbol|reliquary|emblem|amulet of/i.test(n)) return 'components';
   if (/armor|mail|plate|shield|breastplate|leather|hide|padded|brigandine/i.test(n) && type !== 'Fashion') return 'armor';
   if (type === 'Fashion' || /cloak|robe|boots|gloves|hat|clothes|outfit|gown|vestments|coat|cape/i.test(n)) return 'armor';
   if (type === 'Blacksmith' || type === 'Fletcher' || /sword|axe|bow|dagger|mace|spear|arrow|bolt|crossbow|hammer|club|staff|whip|javelin|trident|lance|pike|halberd|scimitar|rapier|sling/i.test(n)) return 'weapons';
   if (type === 'Jewelry' || /gem|ring|necklace|earring|bracelet|pearl|jewel|figurine|idol|statuette/i.test(n)) return 'treasure';
-  if (type === 'Instruments' || /tools|kit|supplies|instrument/i.test(n)) return 'tools';
-  return 'general';
+  return 'gear';
 };
 
 // Change the character here, stamp what changed, and send it over the live link so the DM's copy follows at once
