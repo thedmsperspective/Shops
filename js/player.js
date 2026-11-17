@@ -240,6 +240,11 @@ async function buy(shop, it0) {
       else list.push({ id: P.model.uid(), name: it.n, n: 1, ...(it.magic ? { magic: true, fromShop: true } : {}), desc: it.magic ? '' : (it.d || '') });
       return ['coins', 'consumables'];
     }
+    // a backpack, pouch, sack, basket or chest: it goes in the sheet's Containers (its limit and weight come from its name)
+    if (!it.magic && !/component/i.test(it.n) && /\b(backpack|pouch|sack|basket|chest)\b/i.test(it.n)) {
+      x.containers = [...(x.containers || []), { id: P.model.uid(), name: it.n }];
+      return ['coins', 'containers'];
+    }
     const cat = catFor(shop.type, it);
     const list = (x.inv[cat] = x.inv[cat] || []);
     const row = list.find(y => String(y.name).toLowerCase() === it.n.toLowerCase());
