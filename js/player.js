@@ -60,7 +60,8 @@ function draw() {
         <span class="small">${esc(s.keeper?.name || '')}${s.keeper?.race ? `, ${esc([s.keeper.gender, s.keeper.race].filter(Boolean).join(' '))}` : ''}</span>${s.status === 'closed' ? '<br><span class="tag bad">Closed</span>' : ''}${wonBy(s, c) ? '<br><span class="tag ok">Your haggled prices</span>' : ''}</button>`).join('')}</div>`;
     app.querySelectorAll('[data-shop]').forEach(b => { b.onclick = () => { open = b.dataset.shop; tab = 'buy'; draw(); window.scrollTo(0, 0); }; });
   } else {
-    const bands = R.BANDS.map((b, i) => ({ b, items: shop.items.filter(x => x.band === i) })).filter(g => g.items.length);
+    const az = (a, b) => String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' });
+    const bands = R.BANDS.map((b, i) => ({ b, items: shop.items.filter(x => x.band === i).sort((x, y) => az(x.n, y.n)) })).filter(g => g.items.length); // A to Z
     const mine = sellable(shop, c);
     app.innerHTML = `<div class="card"><div class="row"><button class="sm" id="out">← ${esc(view.town)}</button></div>
       <h2>${esc(shop.name)}</h2><p class="mu">${esc(shop.type)} · ${esc(shop.keeper?.name || '')}${shop.keeper?.race ? `, ${esc([shop.keeper.gender, shop.keeper.race].filter(Boolean).join(' '))}` : ''}</p>${haggleLine(shop, c)}${who}

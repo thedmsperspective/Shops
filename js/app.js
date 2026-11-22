@@ -452,10 +452,12 @@ function addShopDialog(l) {
   });
 }
 
+const az = (a, b) => String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' }); // A to Z, "Potion 2" before "Potion 10"
 function shopView(app) {
   const l = loc(), s = shopOf(), k = s.keeper || {};
-  const bands = R.BANDS.map((b, i) => ({ b, items: s.items.filter(x => x.band === i) })).filter(g => g.items.length);
-  const other = s.items.filter(x => !(x.band >= 0 && x.band <= 4));
+  // always A to Z within each quality, however things were added or renamed
+  const bands = R.BANDS.map((b, i) => ({ b, items: s.items.filter(x => x.band === i).sort((x, y) => az(x.name, y.name)) })).filter(g => g.items.length);
+  const other = s.items.filter(x => !(x.band >= 0 && x.band <= 4)).sort((x, y) => az(x.name, y.name));
   if (other.length) bands.push({ b: 'Other', items: other });
   const row = it => {
     const sell = R.sellPrice(s, it), buy = R.buyPrice(s, it), none = it.qty === 0;
@@ -685,7 +687,7 @@ function listView(app) {
   const type = ui.type, mine = usingMine(), items = masterOf(type);
   if (mine && items.some(x => !x.key)) { items.forEach(x => { if (!x.key) x.key = uid(); }); saveLib(); }
   const q = (ui.q || '').toLowerCase();
-  const shown = items.map((it, i) => ({ it, i })).filter(x => !q || x.it.name.toLowerCase().includes(q));
+  const shown = items.map((it, i) => ({ it, i })).filter(x => !q || x.it.name.toLowerCase().includes(q)).sort((x, y) => az(x.it.name, y.it.name)); // A to Z
   const groups = [...R.BANDS.map((b, i) => ({ b: `${b} Quality`, list: shown.filter(x => x.it.band === i) })), { b: 'Other', list: shown.filter(x => !(x.it.band >= 0 && x.it.band <= 4)) }].filter(g => g.list.length);
   app.innerHTML = `<div class="card"><div class="row"><h2 class="grow">${esc(type)}</h2>${mine && ownKinds().includes(type) ? '<button id="editKind">Rename or remove</button>' : ''}${mine ? '<button class="pri" id="addM">+ Add an item</button>' : '<button class="pri" id="mkOwn">Make my own copy to edit</button>'}</div>
     <p class="mu small">${items.length} items. Restock shows how many come in each month at Quality 1 to 5 (a roll, times the number after ×). ${mine ? 'Tap an item to change it.' : ''}</p>
